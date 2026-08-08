@@ -8,7 +8,7 @@
       <h1>Hey! I'm Mehmet</h1>
     </td>
     <td width="50%" align="center" valign="middle">
-      <img align="right" src="https://raw.githubusercontent.com/reekta92/.github/main/profile-summary-card-output/github_dark/3-stats.svg" alt="reekta92's GitHub stats" />
+      <img align="right" src="https://github-profile-summary-cards.vercel.app/api/cards/stats?username=reekta92&theme=github_dark" alt="reekta92's GitHub stats" />
     </td>
   </tr>
 </table>
