@@ -29,7 +29,7 @@
 
 I'm a **software developer/game designer** and a hobbyist making **FOSS projects** for everyone to use.
 
-I love working with concepts like **project management**, **architecture design**, **optimizations**(also **DOD** for games), **physics engines**, graphical rendering via **Vulkan**, automation via **Arduino** and **Linux**(btw).
+I love working with concepts like **project management**, **architecture design**, **algorithms**, **optimizations**(also **DOD** for games), **physics engines**, graphical rendering via **Vulkan**, automation via **Arduino** and **Linux**(btw).
 
 Currently developing and maintaining some Rust projects like [clin-rs](https://github.com/reekta92/clin-rs), [graf](https://github.com/reekta92/graf), [pinstar](https://github.com/reekta92/pinstar) and [sicth](https://github.com/reekta92/sicth).
 
