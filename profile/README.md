@@ -1,7 +1,5 @@
 <p align=center> <img alt="FINAL" src="https://github.com/user-attachments/assets/c0dc38eb-bafe-4f79-8a0e-cc7931429072" /> </p>
 
-<h6 align="center"><i>fun fact: the above animation and illustrations are generated with pure code and i like mountains</i></h6>
-
 <table width="100%" align=center>
   <tr>
     <td width="50%" align="center" valign="middle">
