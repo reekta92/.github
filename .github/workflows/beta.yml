@@ -1,0 +1,28 @@
+name: Auto Label Beta Issues
+
+on:
+  issues:
+    types: [opened, edited]
+  workflow_call:
+
+jobs:
+  label_beta:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Parse body and apply beta label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Ensure label exists first
+          gh label create "beta" --repo "$REPO" --color "fbca04" --description "Beta or experimental" || true
+          
+          if echo "$ISSUE_BODY" | grep -q "Beta / Nightly / Experimental"; then
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "beta"
+          else
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "beta" || true
+          fi
