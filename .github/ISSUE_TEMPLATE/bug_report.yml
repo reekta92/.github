@@ -1,0 +1,84 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: dropdown
+    id: version_type
+    attributes:
+      label: Version Type
+      description: Is this issue occurring on a stable release or a beta/experimental branch?
+      options:
+        - Stable
+        - Beta / Nightly / Experimental
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+      placeholder: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: To Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Run the application...
+        2. Navigate to '...'
+        3. Press '...'
+        4. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: e.g. Arch Linux, Ubuntu 24.04, macOS Sonoma
+      placeholder: Arch Linux
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal Emulator
+      description: e.g. Alacritty, Kitty, Ghostty (if applicable)
+    validations:
+      required: false
+  - type: input
+    id: app_version
+    attributes:
+      label: App Version
+      description: The version of the app where the bug occurs.
+      placeholder: "0.8.6"
+    validations:
+      required: true
+  - type: input
+    id: rust_version
+    attributes:
+      label: Rust Version (if built from source)
+      description: Output of `rustc --version`
+      placeholder: "rustc 1.85.0"
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any other context about the problem here (Screenshots, logs, or config excerpts).
+    validations:
+      required: false
