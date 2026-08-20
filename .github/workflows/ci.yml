@@ -25,12 +25,20 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "style: cargo fmt"
       - run: cargo fmt --all -- --check
 
   clippy:
