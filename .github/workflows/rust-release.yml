@@ -690,11 +690,19 @@ jobs:
         run: |
           # shellcheck disable=SC2086
           [ -n "$APT_DEPS" ] && { sudo apt-get update && sudo apt-get install -y $APT_DEPS; } || true
+      - name: Check token
+        id: token
+        run: |
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "provided=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "provided=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish
-        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
+        if: ${{ steps.token.outputs.provided == 'true' }}
         run: cargo publish --locked
       - name: Token missing
-        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
+        if: ${{ steps.token.outputs.provided == 'false' }}
         run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"
 
   # ────────────────────────────────────────────
@@ -729,8 +737,16 @@ jobs:
           SHA=$(sha256sum tarball.tar.xz | cut -d' ' -f1)
           sed -i "s/^sha256sums=.*/sha256sums=(\"$SHA\")/" PKGBUILD
           sed -i "s|^source=.*|source=(\"${{ github.server_url }}/${{ github.repository }}/releases/download/$TAG/$TARBALL_NAME\")|" PKGBUILD
+      - name: Check key
+        id: key
+        run: |
+          if [ -n "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "provided=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "provided=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish to AUR
-        if: ${{ env.AUR_SSH_PRIVATE_KEY != '' }}
+        if: ${{ steps.key.outputs.provided == 'true' }}
         uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
         with:
           pkgname: ${{ inputs.AUR_PKGNAME }}
@@ -740,7 +756,7 @@ jobs:
           ssh_private_key: ${{ env.AUR_SSH_PRIVATE_KEY }}
           commit_message: "Update to ${{ needs.calculate_version.outputs.new_version }}"
       - name: Key missing
-        if: ${{ env.AUR_SSH_PRIVATE_KEY == '' }}
+        if: ${{ steps.key.outputs.provided == 'false' }}
         run: echo "::warning::AUR_SSH_PRIVATE_KEY not set — skipping AUR publish"
 
   # ────────────────────────────────────────────
