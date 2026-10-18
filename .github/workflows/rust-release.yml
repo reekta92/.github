@@ -454,6 +454,24 @@ jobs:
       - name: Ad-hoc sign macOS binary
         if: ${{ startsWith(matrix.os, 'macos') }}
         run: codesign --force --sign - "target/${{ matrix.target }}/release/${{ inputs.BIN_NAME }}"
+      - name: Package macOS application
+        if: ${{ startsWith(matrix.os, 'macos') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="${{ inputs.BIN_NAME }}.app"
+          if [ -d "assets/$APP" ]; then
+            cp -R "assets/$APP" "$APP"
+            mkdir -p "$APP/Contents/Resources"
+            cp "target/${{ matrix.target }}/release/${{ inputs.BIN_NAME }}" "$APP/Contents/Resources/"
+            cp "assets/${{ inputs.BIN_NAME }}.icns" "$APP/Contents/Resources/"
+            chmod +x "$APP/Contents/MacOS/${{ inputs.BIN_NAME }}"
+            VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r --arg root "$GITHUB_WORKSPACE/Cargo.toml" \
+              '.packages[] | select(.manifest_path == $root) | .version')
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION%%-*}" "$APP/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION%%-*}" "$APP/Contents/Info.plist"
+            codesign --force --deep --sign - "$APP"
+          fi
       - name: Package
         shell: bash
         run: |
@@ -462,11 +480,19 @@ jobs:
           EXE="${{ inputs.BIN_NAME }}"
           [ "${{ matrix.os }}" = "windows-latest" ] && EXE="${{ inputs.BIN_NAME }}.exe"
           cp "target/${{ matrix.target }}/release/$EXE" .
+          FILES=("$EXE" LICENSE README.md)
+          for ASSET in assets/icon.svg "assets/${{ inputs.BIN_NAME }}.desktop" "assets/${{ inputs.BIN_NAME }}.png" \
+            "${{ inputs.BIN_NAME }}.ico" "assets/${{ inputs.BIN_NAME }}.icns"; do
+            if [ -f "$ASSET" ]; then FILES+=("$ASSET"); fi
+          done
+          if [ "${{ matrix.os }}" != "windows-latest" ] && [ -d "${{ inputs.BIN_NAME }}.app" ]; then
+            FILES+=("${{ inputs.BIN_NAME }}.app")
+          fi
           if [ "${{ matrix.pkg }}" = "zip" ]; then
-            7z a "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.zip" "$EXE" LICENSE README.md
+            7z a "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.zip" "${FILES[@]}"
           else
-            tar -cJf "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.tar.xz" "$EXE" LICENSE README.md
-            tar -czf "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.tar.gz" "$EXE" LICENSE README.md
+            tar -cJf "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.tar.xz" "${FILES[@]}"
+            tar -czf "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.tar.gz" "${FILES[@]}"
           fi
       - name: Package DMG (macOS)
         if: ${{ inputs.build_dmg && startsWith(matrix.os, 'macos') }}
@@ -474,8 +500,22 @@ jobs:
           set -euo pipefail
           mkdir -p dmg_root
           cp "${{ inputs.BIN_NAME }}" LICENSE README.md dmg_root/
-          hdiutil create -volname "${{ inputs.BIN_NAME }}" -srcfolder dmg_root -ov -format UDZO \
-            "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.dmg"
+          if [ -d "${{ inputs.BIN_NAME }}.app" ]; then
+            cp -R "${{ inputs.BIN_NAME }}.app" dmg_root/
+          fi
+          IMAGE="$RUNNER_TEMP/${{ inputs.PKG_PREFIX }}.dmg"
+          hdiutil create -volname "${{ inputs.BIN_NAME }}" -srcfolder dmg_root -ov -format UDRW "$IMAGE"
+          if [ -f "assets/${{ inputs.BIN_NAME }}.icns" ]; then
+            MOUNT="$RUNNER_TEMP/${{ inputs.PKG_PREFIX }}-volume"
+            mkdir -p "$MOUNT"
+            hdiutil attach "$IMAGE" -nobrowse -mountpoint "$MOUNT"
+            trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true' EXIT
+            cp "assets/${{ inputs.BIN_NAME }}.icns" "$MOUNT/.VolumeIcon.icns"
+            SetFile -a C "$MOUNT"
+            hdiutil detach "$MOUNT"
+            trap - EXIT
+          fi
+          hdiutil convert "$IMAGE" -format UDZO -ov -o "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.dmg"
       - name: Checksums
         shell: bash
         run: |
