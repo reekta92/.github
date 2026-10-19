@@ -215,6 +215,25 @@ class ReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(status=status, checksum=expected):
                 self.run_script(script, env={'CRATE': 'fixture', 'VERSION': '1.2.4', 'HTTP_STATUS': status, 'CHECKSUM': expected}, success=succeeds)
 
+    def test_downloaded_assets_do_not_dirty_or_change_cargo_package(self):
+        (self.source / 'src').mkdir()
+        (self.source / 'src/lib.rs').write_text('pub fn fixture() {}\n')
+        (self.source / '.gitignore').write_text('/target/\n')
+        self.env['CARGO_TARGET_DIR'] = str(self.source / 'target')
+        self.run_script('cargo generate-lockfile --offline')
+        git(self.source, 'add', '.')
+        git(self.source, 'commit', '-m', 'Package fixture')
+        self.run_script('cargo package --offline --locked --no-verify')
+        archive = self.source / 'target/package/fixture-1.2.3.crate'
+        expected = archive.read_bytes()
+        downloads = [s['with']['path'] for s in WORKFLOW['jobs']['publish']['steps'] if s.get('uses', '').startswith('actions/download-artifact@')]
+        for path in downloads:
+            destination = self.source / path.replace('${{ runner.temp }}', str(self.root))
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / 'release-artifact.tar.gz').write_bytes(b'Application artifact')
+        self.run_script('cargo package --offline --locked --no-verify')
+        self.assertEqual(archive.read_bytes(), expected)
+
     def test_missing_credentials_fail_before_mutation(self):
         env = dict(PUBLISH_CRATES='true', CREATE_DISCUSSION='false', CARGO_REGISTRY_TOKEN='', BOT_TOKEN='')
         script = step('publish', 'Require publishing credentials')
