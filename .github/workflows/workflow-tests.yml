@@ -1,0 +1,25 @@
+name: Workflow Tests
+
+on:
+  push:
+    paths: ['.github/workflows/**', '.github/scripts/**']
+  pull_request:
+    paths: ['.github/workflows/**', '.github/scripts/**']
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint@1.7.12
+      - run: actionlint
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
