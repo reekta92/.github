@@ -130,6 +130,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.run_script(step('prepare', 'Bundle the validated release commit'))
         restored = self.root / 'restored'
         git(self.source, 'clone', '--depth', '1', '--branch', 'main', self.remote.as_uri(), str(restored))
+        # Wait for fetch maintenance before the temporary repository is removed.
+        git(restored, 'config', 'maintenance.autoDetach', 'false')
+        git(restored, 'config', 'gc.autoDetach', 'false')
         bundle_dir = self.root / 'release-source'
         bundle_dir.mkdir()
         (self.root / 'release.bundle').rename(bundle_dir / 'release.bundle')
