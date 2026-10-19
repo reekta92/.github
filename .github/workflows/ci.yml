@@ -2,8 +2,14 @@ name: CI
 
 on:
   workflow_call:
+    inputs:
+      all_features:
+        description: "Test optional integrations as well as default features"
+        type: boolean
+        default: false
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -11,64 +17,84 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  ALL_FEATURES: ${{ inputs.all_features }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked
-
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
+        with:
+          env-vars: ALL_FEATURES
+          save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+      - name: Clippy and tests
+        run: |
+          FEATURES=()
+          if [ "$ALL_FEATURES" = true ]; then FEATURES+=(--all-features); fi
+          cargo clippy --locked --all-targets "${FEATURES[@]}" -- -D warnings
+          # Default cargo test includes doctests; --all-targets would omit them.
+          cargo test --locked "${FEATURES[@]}"
 
-  clippy:
-    name: Clippy
+  msrv:
+    name: MSRV
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read declared minimum Rust version
+        id: msrv
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+
+          package = tomllib.loads(Path('Cargo.toml').read_text()).get('package', {})
+          version = package.get('rust-version')
+          if not isinstance(version, str) or not re.fullmatch(r'1\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?', version):
+              raise SystemExit('::error::A root package with an explicit rust-version is required')
+          if version.count('.') == 1:
+              version += '.0'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'toolchain={version}', file=output)
+          PY
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          toolchain: ${{ steps.msrv.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --locked --all-targets -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+        with:
+          env-vars: ALL_FEATURES
+          save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+      - name: Check all targets on minimum Rust
+        run: |
+          FEATURES=()
+          if [ "$ALL_FEATURES" = true ]; then FEATURES+=(--all-features); fi
+          cargo check --locked --all-targets "${FEATURES[@]}"
 
   deny:
     name: Deny
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-
-  msrv:
-    name: MSRV (1.90.0)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.90.0"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked
+          arguments: --locked --all-features

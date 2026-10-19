@@ -40,7 +40,19 @@ Push the shared workflow commit first, then update every caller's `uses` referen
 
 ## Continuous integration
 
-`ci.yml` checks formatting without committing changes or requesting write access. Callers pin it to the same shared workflow commit; check names remain unchanged.
+`ci.yml` uses three read-only jobs:
+
+- **Check:** formatting first, then Clippy and tests (including doctests) on stable Rust. These checks share one checkout, toolchain setup, and cache restore; Cargo can still compile separately for checking and linking. A separate stable `cargo check` is unnecessary because Clippy already checks all targets.
+- **MSRV:** read the root package's explicit `rust-version`, install that exact minimum (for example, `1.88` becomes `1.88.0`), and check all targets. This replaces both the previous shared Rust 1.90 constant and draw-rs's extra MSRV job.
+- **Deny:** check advisories, licenses, bans, and sources against the committed lockfile, including every feature. Repository dependency policies remain authoritative; CI does not suppress failures.
+
+The `all_features` input enables optional integrations for tests, Clippy, and MSRV. The pinstar caller enables it for Mermaid; other current callers use their default features. pinstar declares Rust 1.90 because its locked image dependency graph already requires that compiler; graf declares Rust 1.88, and the other applications/libraries declare Rust 1.90.
+
+Rust cache keys include the selected feature mode and compiler version. Only successful default-branch push jobs save Rust caches. Pull requests restore the default-branch cache without uploading duplicate entries. Formatting has no compilation cache to restore. Concurrency cancels obsolete runs; every job has a time limit and checkouts do not retain credentials.
+
+Callers pin CI independently from the release workflow. The job names are now `Check`, `MSRV`, and `Deny`; update any external required-check rules referring to the removed `Format`, `Clippy`, `Test`, or `MSRV (1.90.0)` names. The five current repositories have no such required-check rules. draw-rs now runs pushes only on main/master and pull requests, avoiding two CI runs for each feature-branch PR update.
+
+Runner jobs fall from six to three per run (seven to three for draw-rs). This removes redundant checks and runner/cache setup; wall-clock speed depends on cache state and project size.
 
 ## Validation
 
