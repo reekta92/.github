@@ -38,6 +38,10 @@ The default stable bump is `patch`. A stable version starts its next prerelease 
 
 Push the shared workflow commit first, then update every caller's `uses` reference to its full SHA. Callers can adopt that SHA before this repository's default branch changes. This avoids breaking older callers on `@main` while inputs are removed. Keep caller references pinned when later changing the shared workflow.
 
+## Continuous integration
+
+`ci.yml` checks formatting without committing changes or requesting write access. Callers pin it to the same shared workflow commit; check names remain unchanged.
+
 ## Validation
 
 ```sh
