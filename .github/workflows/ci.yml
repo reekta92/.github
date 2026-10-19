@@ -39,6 +39,7 @@ jobs:
         run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@v2
         with:
+          env-vars: ALL_FEATURES
           save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
       - name: Clippy and tests
         run: |
@@ -77,6 +78,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
         with:
+          env-vars: ALL_FEATURES
           save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
       - name: Check all targets on minimum Rust
         run: |

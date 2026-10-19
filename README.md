@@ -48,7 +48,7 @@ Push the shared workflow commit first, then update every caller's `uses` referen
 
 The `all_features` input enables optional integrations for tests, Clippy, and MSRV. The pinstar caller enables it for Mermaid; other current callers use their default features. pinstar declares Rust 1.90 because its locked image dependency graph already requires that compiler; graf declares Rust 1.88, and the other applications/libraries declare Rust 1.90.
 
-Only successful default-branch push jobs save Rust caches. Pull requests restore the default-branch cache without uploading duplicate entries. Formatting has no compilation cache to restore. Concurrency cancels obsolete runs; every job has a time limit and checkouts do not retain credentials.
+Rust cache keys include the selected feature mode and compiler version. Only successful default-branch push jobs save Rust caches. Pull requests restore the default-branch cache without uploading duplicate entries. Formatting has no compilation cache to restore. Concurrency cancels obsolete runs; every job has a time limit and checkouts do not retain credentials.
 
 Callers pin CI independently from the release workflow. The job names are now `Check`, `MSRV`, and `Deny`; update any external required-check rules referring to the removed `Format`, `Clippy`, `Test`, or `MSRV (1.90.0)` names. The five current repositories have no such required-check rules. draw-rs now runs pushes only on main/master and pull requests, avoiding two CI runs for each feature-branch PR update.
 
