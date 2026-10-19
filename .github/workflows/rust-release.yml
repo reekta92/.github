@@ -1,438 +1,334 @@
 name: Release
 
 # Reusable Rust release workflow — template master copy.
-# Per-repo install: copy to .github/workflows/release.yml, edit ONLY the
-# PROJECT CONFIG block below and the input defaults. Nothing else.
+# Repositories select crate or application releases in their caller workflow.
 # Changelog via git-cliff when cliff.toml exists (plain commit list otherwise).
-# LICENSE + README.md are required. Approval gate activates when an environment
-# named by repo variable RELEASE_APPROVAL_ENVIRONMENT (default "release-approval")
-# exists with required reviewers.
+# LICENSE + README.md are required for application packaging. Approval uses the
+# environment named by RELEASE_APPROVAL_ENVIRONMENT (default release-approval).
+# Every job consumes the same local release commit, including dry runs.
 
 on:
   workflow_call:
     secrets:
       BOT_TOKEN:
-        description: "PAT to bypass branch protection for commits (fallback to GITHUB_TOKEN)"
+        description: "Token for protected branch pushes; falls back to GITHUB_TOKEN"
         required: false
       CARGO_REGISTRY_TOKEN:
         required: false
-      AUR_SSH_PRIVATE_KEY:
-        required: false
     inputs:
+      release_kind:
+        description: "crate publishes only to crates.io; application also builds GitHub assets"
+        type: string
+        default: crate
       BIN_NAME:
-        required: true
         type: string
+        default: ""
       PKG_PREFIX:
-        required: true
         type: string
-      AUR_PKGNAME:
-        required: true
-        type: string
+        default: ""
       SMOKE_ARGS:
-        required: true
         type: string
+        default: --help
       bump:
-        description: "Version bump type (ignored for prerelease continuation/graduation, override, overwrite)"
-        required: true
+        description: "Version increment; existing prereleases continue or graduate"
         type: string
+        default: patch
       prerelease:
-        description: "Mark this release as a pre-release"
-        required: false
         type: boolean
         default: false
       prerelease_identifier:
-        description: "Pre-release identifier (e.g., rc, beta, alpha)"
-        required: false
         type: string
         default: rc
       override_version:
-        description: "Manually set the version (strict semver, e.g. 1.2.3-rc.0). Ignores 'bump'."
-        required: false
+        description: "Exact, strictly newer semver; overrides bump and prerelease controls"
         type: string
         default: ""
-      overwrite_release:
-        description: "Rebuild/replace the release at the current version (force-move tag, re-upload assets). Ignores 'bump'."
-        required: false
-        type: boolean
-        default: false
       target_branch:
-        description: "Branch to base the release on"
-        required: false
         type: string
         default: main
       dry_run:
-        description: "Run gates + version calc + builds WITHOUT push/tag/release/publish"
-        required: false
+        description: "Validate and build the candidate without pushing or publishing"
         type: boolean
         default: false
       skip_gates:
-        description: "Skip quality gates (emergency escape hatch)"
-        required: false
+        description: "Skip fmt/clippy/tests; package verification remains mandatory"
         type: boolean
         default: false
-      build_packages:
-        description: "Build .deb and .rpm (x86_64 + aarch64)"
-        required: false
+      all_features:
+        description: "Check all Cargo features, including optional library integrations"
         type: boolean
-        default: true
-      build_appimage:
-        description: "Build x86_64 AppImage (needs assets/<BIN>.desktop + assets/<BIN>.png)"
-        required: false
-        type: boolean
-        default: true
-      build_dmg:
-        description: "Build DMG for macOS targets"
-        required: false
-        type: boolean
-        default: true
-      build_targets:
-        description: "Which target set to build ('linux-only' = fast iteration / local act runs)"
-        required: true
+        default: false
+      apt_deps:
+        description: "Linux build dependencies, separated by spaces"
         type: string
-      publish_crates:
-        description: "Publish to crates.io (also enables the publish dry-run gate)"
-        required: false
+        default: ""
+      build_packages:
         type: boolean
-        default: true
-      publish_aur:
-        description: "Publish to AUR (needs PKGBUILD + AUR_SSH_PRIVATE_KEY secret)"
-        required: false
+        default: false
+      build_appimage:
+        type: boolean
+        default: false
+      build_dmg:
+        type: boolean
+        default: false
+      build_macos_intel:
+        type: boolean
+        default: false
+      build_targets:
+        type: string
+        default: all
+      publish_crates:
         type: boolean
         default: true
       update_docs:
-        description: "Post-release commit updating README/PKGBUILD artifact references"
-        required: false
         type: boolean
-        default: true
+        default: false
+      check_nix:
+        type: boolean
+        default: false
       create_discussion:
-        description: "Create a release discussion in DISCUSSION_CATEGORY"
-        required: false
+        description: "Requires a BOT_TOKEN with discussion permissions"
         type: boolean
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.repository }}
   cancel-in-progress: false
 
-# ══ PROJECT CONFIG — edit per repo ══════════════════════════════
 env:
   CARGO_TERM_COLOR: always
-  APT_DEPS: "libssl-dev pkg-config"
-  CROSS_APT_DEPS: "gcc-aarch64-linux-gnu libssl-dev:arm64 pkg-config"
-  DISCUSSION_CATEGORY: "Announcements"
-# ════════════════════════════════════════════════════════════════
+  APT_DEPS: ${{ inputs.apt_deps }}
+  DISCUSSION_CATEGORY: Announcements
+  BIN_NAME: ${{ inputs.BIN_NAME }}
+  PKG_PREFIX: ${{ inputs.PKG_PREFIX }}
+  SMOKE_ARGS: ${{ inputs.SMOKE_ARGS }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  # ────────────────────────────────────────────
-  # 1. Validate inputs, emit build matrix
-  # ────────────────────────────────────────────
-  configure:
-    name: Configure & Validate
+  prepare:
+    name: Prepare & Validate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
-      matrix: ${{ steps.cfg.outputs.matrix }}
-      base_commit: ${{ steps.cfg.outputs.base_commit }}
+      matrix: ${{ steps.configure.outputs.matrix }}
+      base_commit: ${{ steps.configure.outputs.base_commit }}
+      new_version: ${{ steps.configure.outputs.new_version }}
+      tag: ${{ steps.configure.outputs.tag }}
+      prerelease: ${{ steps.configure.outputs.prerelease }}
+      crate: ${{ steps.configure.outputs.crate }}
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-      - name: Validate inputs and emit matrix
-        id: cfg
+          ref: refs/heads/${{ inputs.target_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate inputs and calculate version
+        id: configure
+        env:
+          RELEASE_INPUTS: ${{ toJSON(inputs) }}
         run: |
-          set -euo pipefail
-          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
-          OV="${{ inputs.override_version }}"
-          if [ -n "$OV" ] && ! echo "$OV" | grep -qP "$SEMVER_RE"; then
-            echo "::error::override_version '$OV' is not strict semver"; exit 1
-          fi
-          if [ "${{ inputs.prerelease }}" = "true" ] && ! echo "${{ inputs.prerelease_identifier }}" | grep -qE '^[0-9A-Za-z-]+$'; then
-            echo "::error::prerelease_identifier must match [0-9A-Za-z-]+"; exit 1
-          fi
-          BRANCH="${{ inputs.target_branch }}"
-          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1 \
-            || { echo "::error::Branch '$BRANCH' does not exist on origin"; exit 1; }
-          for f in LICENSE README.md; do
-            [ -f "$f" ] || { echo "::error::$f is required for packaging"; exit 1; }
-          done
-          if [ "${{ inputs.build_appimage }}" = "true" ]; then
-            for f in "assets/${{ inputs.BIN_NAME }}.desktop" "assets/${{ inputs.BIN_NAME }}.png"; do
-              [ -f "$f" ] || { echo "::error::build_appimage requires $f"; exit 1; }
-            done
-          fi
-          if [ "${{ inputs.publish_aur }}" = "true" ] && [ ! -f PKGBUILD ]; then
-            echo "::error::publish_aur requires a PKGBUILD at repo root"; exit 1
-          fi
-          if [ "${{ inputs.skip_gates }}" = "true" ]; then
-            echo "::warning::Quality gates skipped by skip_gates input"
-          fi
+          python3 - <<'PY'
+          import json, os, re, subprocess, tomllib
+          from pathlib import Path
 
-          if [ "${{ inputs.build_targets }}" = "linux-only" ]; then
-            ROWS=$(jq -nc '[
-              {target:"x86_64-unknown-linux-gnu",  os:"ubuntu-22.04", pkg:"tar"},
-              {target:"aarch64-unknown-linux-gnu", os:"ubuntu-22.04-arm", pkg:"tar"}
-            ]')
-          else
-            ROWS=$(jq -nc '[
-              {target:"x86_64-unknown-linux-gnu",  os:"ubuntu-22.04",   pkg:"tar"},
-              {target:"aarch64-unknown-linux-gnu", os:"ubuntu-22.04-arm",   pkg:"tar"},
-              {target:"x86_64-pc-windows-msvc",    os:"windows-latest", pkg:"zip"},
-              {target:"aarch64-apple-darwin",      os:"macos-latest",   pkg:"tar"}
-            ]')
-          fi
-          echo "matrix=$(echo "$ROWS" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
-          echo "base_commit=$(git rev-parse "origin/$BRANCH")" >> "$GITHUB_OUTPUT"
+          cfg = json.loads(os.environ['RELEASE_INPUTS'])
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(f'::error::{message}')
 
-  # ────────────────────────────────────────────
-  # 2. Quality gates (before any mutation)
-  # ────────────────────────────────────────────
-  gates:
-    name: Quality Gates
-    needs: configure
-    if: ${{ !inputs.skip_gates }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          ref: ${{ inputs.target_branch }}
+          number = r'(0|[1-9][0-9]*)'
+          identifier = r'(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver = re.compile(rf'{number}\.{number}\.{number}(?:-({identifier}(?:\.{identifier})*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?')
+          def parse(version):
+              match = semver.fullmatch(version)
+              require(match is not None, f'Invalid strict semver: {version!r}')
+              major, minor, patch, pre = match.groups()
+              suffix = tuple((0, int(p)) if p.isdigit() else (1, p) for p in pre.split('.')) if pre else ()
+              return (int(major), int(minor), int(patch), int(pre is None), suffix)
+
+          require(cfg['release_kind'] in ('crate', 'application'), 'release_kind must be crate or application')
+          require(cfg['bump'] in ('patch', 'minor', 'major'), 'bump must be patch, minor or major')
+          require(cfg['build_targets'] in ('all', 'linux-only'), 'build_targets must be all or linux-only')
+          subprocess.run(['git', 'check-ref-format', 'refs/heads/' + cfg['target_branch']], check=True)
+          manifest = tomllib.loads(Path('Cargo.toml').read_text())
+          package = manifest.get('package', {})
+          current = package.get('version')
+          require(isinstance(current, str), 'A root package with an explicit version is required')
+          old = parse(current)
+          major, minor, patch = old[:3]
+          base = f'{major}.{minor}.{patch}'
+          next_base = {'patch': f'{major}.{minor}.{patch + 1}', 'minor': f'{major}.{minor + 1}.0', 'major': f'{major + 1}.0.0'}[cfg['bump']]
+          pre = cfg['prerelease_identifier']
+          if cfg['override_version']:
+              new = cfg['override_version']
+          elif cfg['prerelease']:
+              require(re.fullmatch(identifier, pre) is not None, 'prerelease_identifier must be one semver identifier')
+              previous = current.split('+', 1)[0].split('-', 1)
+              continuation = re.fullmatch(re.escape(pre) + r'\.(0|[1-9][0-9]*)', previous[1]) if len(previous) == 2 else None
+              new = f'{base}-{pre}.{int(continuation[1]) + 1}' if continuation else f'{base if len(previous) == 2 else next_base}-{pre}.0'
+          else:
+              new = base if old[3] == 0 else next_base
+          require(parse(new) > old, f'Release version {new} must be newer than {current}')
+          tag = 'v' + new
+          exists = subprocess.run(['git', 'show-ref', '--verify', '--quiet', 'refs/tags/' + tag]).returncode
+          require(exists == 1, f'Tag {tag} already exists or could not be checked')
+          application = cfg['release_kind'] == 'application'
+          if application:
+              for key in ('BIN_NAME', 'PKG_PREFIX'):
+                  require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', cfg[key]) is not None, f'{key} is required and must be a safe filename')
+              for name in ('LICENSE', 'README.md'):
+                  require(Path(name).is_file(), f'{name} is required for packaging')
+          else:
+              require(cfg['publish_crates'], 'crate releases require publish_crates')
+              require(not any(cfg[k] for k in ('build_packages', 'build_appimage', 'build_dmg', 'build_macos_intel', 'update_docs', 'create_discussion')), 'crate releases cannot enable application steps')
+          if cfg['build_appimage']:
+              for name in (f"assets/{cfg['BIN_NAME']}.desktop", f"assets/{cfg['BIN_NAME']}.png"):
+                  require(Path(name).is_file(), f'build_appimage requires {name}')
+          rows = [
+              {'target': 'x86_64-unknown-linux-gnu', 'os': 'ubuntu-22.04', 'pkg': 'tar'},
+              {'target': 'aarch64-unknown-linux-gnu', 'os': 'ubuntu-22.04-arm', 'pkg': 'tar'},
+          ]
+          if cfg['build_targets'] == 'all':
+              rows += [
+                  {'target': 'x86_64-pc-windows-msvc', 'os': 'windows-latest', 'pkg': 'zip'},
+                  {'target': 'aarch64-apple-darwin', 'os': 'macos-latest', 'pkg': 'tar'},
+              ]
+              if cfg['build_macos_intel']:
+                  rows.append({'target': 'x86_64-apple-darwin', 'os': 'macos-15-intel', 'pkg': 'tar'})
+          values = dict(matrix=json.dumps({'include': rows}), base_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), new_version=new, tag=tag, prerelease=str(parse(new)[3] == 0).lower(), crate=package['name'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in values.items():
+                  print(f'{key}={value}', file=output)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              print(f"Release candidate: **{package['name']} {new}** ({cfg['release_kind']}).\n\nSource: `{values['base_commit']}`. Dry run: `{cfg['dry_run']}`.", file=summary)
+          PY
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --locked
-      - name: crates.io dry-run
-        if: ${{ inputs.publish_crates }}
+      - name: Install build deps
+        if: ${{ inputs.apt_deps != '' }}
         run: |
-          cargo package --locked
-          cargo publish --dry-run --locked
-
-  # ────────────────────────────────────────────
-  # 3. Calculate release version (hardened semver + guards)
-  # ────────────────────────────────────────────
-  calculate_version:
-    name: Calculate Release Version
-    needs: configure
-    runs-on: ubuntu-latest
-    outputs:
-      old_version: ${{ steps.calculate.outputs.old_version }}
-      new_version: ${{ steps.calculate.outputs.new_version }}
-      tag: ${{ steps.calculate.outputs.tag }}
-      target_branch: ${{ inputs.target_branch }}
-      overwrite: ${{ inputs.overwrite_release }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          fetch-depth: 0
-          ref: ${{ inputs.target_branch }}
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Calculate next version
-        id: calculate
-        run: |
-          set -euo pipefail
-          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
-          OVERRIDE_VERSION="${{ inputs.override_version }}"
-          OVERWRITE="${{ inputs.overwrite_release }}"
-          CURRENT=$(cargo metadata --no-deps --format-version 1 | jq -r --arg root "$GITHUB_WORKSPACE/Cargo.toml" \
-            '.packages[] | select(.manifest_path == $root) | .version')
-          [ -n "$CURRENT" ] || { echo "::error::Root package not found in cargo metadata (virtual workspace unsupported)"; exit 1; }
-
-          if [ -n "$OVERRIDE_VERSION" ]; then
-            NEW="$OVERRIDE_VERSION"
-          else
-            CURRENT=${CURRENT%%+*}
-            BUMP_TYPE="${{ inputs.bump }}"
-            PRERELEASE="${{ inputs.prerelease }}"
-            PRE_ID="${{ inputs.prerelease_identifier }}"
-            CURRENT_BASE=${CURRENT%%-*}
-            CURRENT_PRE=""
-            CURRENT_PRE_NUM=""
-            if [[ "$CURRENT" == *-* ]]; then
-              PARSED=$(echo "${CURRENT#*-}" | sed -n 's/^\([^.]\+\)\.\([0-9]\+\)$/\1 \2/p')
-              if [ -n "$PARSED" ]; then
-                CURRENT_PRE=${PARSED% *}
-                CURRENT_PRE_NUM=${PARSED#* }
-              else
-                echo "::warning::Unparseable prerelease suffix in '$CURRENT' — treating as stable base"
-              fi
-            fi
-            IS_PRE=false
-            [ -n "$CURRENT_PRE" ] && IS_PRE=true
-
-            IFS='.' read -r MAJ MIN PAT <<< "$CURRENT_BASE"
-            case "$BUMP_TYPE" in
-              patch) NEXT_BASE="$MAJ.$MIN.$((PAT+1))";;
-              minor) NEXT_BASE="$MAJ.$((MIN+1)).0";;
-              major) NEXT_BASE="$((MAJ+1)).0.0";;
-            esac
-
-            if [ "$OVERWRITE" = "true" ]; then
-              NEW="$CURRENT_BASE"
-            elif [ "$PRERELEASE" = "true" ]; then
-              if [ -z "$PRE_ID" ]; then
-                NEW="$CURRENT_BASE"
-              elif [ "$IS_PRE" = "true" ] && [ "$CURRENT_PRE" = "$PRE_ID" ]; then
-                NEW="$CURRENT_BASE-$PRE_ID.$((CURRENT_PRE_NUM+1))"
-              else
-                NEW="$CURRENT_BASE-$PRE_ID.0"
-              fi
-            else
-              if [ "$IS_PRE" = "true" ]; then
-                NEW="$CURRENT_BASE"
-              else
-                NEW="$NEXT_BASE"
-              fi
-            fi
-          fi
-
-          echo "$NEW" | grep -qP "$SEMVER_RE" || { echo "::error::'$NEW' is not valid semver"; exit 1; }
-          if [ "$OVERWRITE" != "true" ]; then
-            if git rev-parse --verify --quiet "refs/tags/v$NEW" >/dev/null; then
-              echo "::error::Tag v$NEW already exists (use overwrite_release to rebuild it)"; exit 1
-            fi
-            if [ "$NEW" = "$CURRENT" ]; then
-              echo "::error::Computed version $NEW equals current version — nothing to release"; exit 1
-            fi
-          fi
-          {
-            echo "old_version=$CURRENT"
-            echo "new_version=$NEW"
-            echo "tag=v$NEW"
-          } >> "$GITHUB_OUTPUT"
-          echo "::notice title=Release Version Preview::Calculated new version is $NEW (current $CURRENT). Approve to proceed."
-
-  # ────────────────────────────────────────────
-  # 4. Approval gate
-  # ────────────────────────────────────────────
-  approval:
-    name: Approve Release
-    needs: [configure, gates, calculate_version]
-    if: ${{ always() && !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    environment:
-      name: ${{ vars.RELEASE_APPROVAL_ENVIRONMENT || 'release-approval' }}
-      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-    steps:
-      - name: Waiting for approval
-        run: |
-          echo "Version to release: ${{ needs.calculate_version.outputs.new_version }}"
-          echo "Branch: ${{ inputs.target_branch }}  |  dry_run: ${{ inputs.dry_run }}  |  overwrite: ${{ inputs.overwrite_release }}"
-          echo "Approve to continue."
-
-  # ────────────────────────────────────────────
-  # 5. Bump version, changelog, commit, push (tag happens in collect)
-  # ────────────────────────────────────────────
-  prepare:
-    name: Prepare Release Commit
-    needs: [configure, gates, calculate_version, approval]
-    if: ${{ always() && !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    outputs:
-      commit_sha: ${{ steps.prep.outputs.commit_sha }}
-      pushed: ${{ steps.prep.outputs.pushed }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          fetch-depth: 0
-          ref: ${{ inputs.target_branch }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: Install tools
+          sudo apt-get update
+          read -r -a packages <<< "$APT_DEPS"
+          sudo apt-get install -y -- "${packages[@]}"
+      - name: Install version and changelog tools
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-edit,git-cliff
-      - name: Set version
+      - name: Set version without updating dependencies
+        env:
+          VERSION: ${{ steps.configure.outputs.new_version }}
+          CRATE: ${{ steps.configure.outputs.crate }}
         run: |
-          set -euo pipefail
-          NEW="${{ needs.calculate_version.outputs.new_version }}"
-          cargo set-version "$NEW"
-          cargo generate-lockfile
-          ACTUAL=$(cargo metadata --no-deps --format-version 1 | jq -r --arg root "$GITHUB_WORKSPACE/Cargo.toml" \
-            '.packages[] | select(.manifest_path == $root) | .version')
-          if [ "$NEW" != "$ACTUAL" ]; then
-            echo "::error::Version mismatch after set-version: expected $NEW, got $ACTUAL"; exit 1
-          fi
+          cp Cargo.lock "$RUNNER_TEMP/original-Cargo.lock"
+          cargo set-version "$VERSION"
+          python3 - <<'PY'
+          import os, tomllib
+          from pathlib import Path
+          original = tomllib.loads((Path(os.environ['RUNNER_TEMP']) / 'original-Cargo.lock').read_text())
+          for package in original['package']:
+              if package['name'] == os.environ['CRATE'] and 'source' not in package:
+                  package['version'] = os.environ['VERSION']
+          actual = tomllib.loads(Path('Cargo.lock').read_text())
+          if original != actual:
+              raise SystemExit('::error::Version update changed dependencies; refresh Cargo.lock separately')
+          PY
       - name: Generate changelog
+        env:
+          TAG: ${{ steps.configure.outputs.tag }}
         run: |
-          set -euo pipefail
-          NEW="${{ needs.calculate_version.outputs.new_version }}"
           PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          NOTES="$RUNNER_TEMP/RELEASE_NOTES.md"
           if [ -f cliff.toml ]; then
-            git cliff --tag "v$NEW" -o CHANGELOG.md
+            git cliff --tag "$TAG" -o CHANGELOG.md
             if [ -z "$PREV_TAG" ]; then
-              git cliff --tag "v$NEW" -o RELEASE_NOTES.md
+              git cliff --tag "$TAG" -o "$NOTES"
             else
-              git cliff "${PREV_TAG}..HEAD" --tag "v$NEW" -o RELEASE_NOTES.md
+              git cliff "${PREV_TAG}..HEAD" --tag "$TAG" -o "$NOTES"
             fi
           else
             echo "No cliff.toml — plain commit-list release notes"
             if [ -z "$PREV_TAG" ]; then
-              git log --pretty='- %s' > RELEASE_NOTES.md
+              git log --pretty='- %s' > "$NOTES"
             else
-              git log --pretty='- %s' "${PREV_TAG}..HEAD" > RELEASE_NOTES.md
+              git log --pretty='- %s' "${PREV_TAG}..HEAD" > "$NOTES"
             fi
           fi
-      - name: Commit and push
-        id: prep
+      - name: Create local release commit
+        id: commit
         env:
-          DRY_RUN: ${{ inputs.dry_run }}
+          TAG: ${{ steps.configure.outputs.tag }}
         run: |
-          set -euo pipefail
-          TAG="${{ needs.calculate_version.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
-          [ -f cliff.toml ] && git add CHANGELOG.md
-          if ! git diff --staged --quiet; then
-            git commit -m "release: $TAG"
-          fi
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "::notice title=Dry Run::Version commit created locally, NOT pushed:"
-            git show --stat HEAD
-            echo "commit_sha=" >> "$GITHUB_OUTPUT"
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
-          else
-            # Plain push on purpose: a rejected push (branch moved) fails the release.
-            git fetch origin "${{ inputs.target_branch }}"
-            git rebase "origin/${{ inputs.target_branch }}"
-            git push origin "HEAD:${{ inputs.target_branch }}"
-            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "pushed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Upload release notes
-        uses: actions/upload-artifact@v4
+          if [ -f cliff.toml ]; then git add CHANGELOG.md; fi
+          git commit -m "release: $TAG"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Quality gates
+        if: ${{ !inputs.skip_gates }}
+        env:
+          ALL_FEATURES: ${{ inputs.all_features }}
+        run: |
+          FEATURES=()
+          if [ "$ALL_FEATURES" = true ]; then FEATURES+=(--all-features); fi
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets "${FEATURES[@]}" -- -D warnings
+          cargo test --locked "${FEATURES[@]}"
+      - name: Verify crates.io package
+        if: ${{ inputs.publish_crates }}
+        run: cargo publish --dry-run --locked
+      - uses: cachix/install-nix-action@v31
+        if: ${{ inputs.check_nix }}
+      - name: Check Nix package
+        if: ${{ inputs.check_nix }}
+        run: nix build --no-link
+      - name: Bundle the validated release commit
+        env:
+          BASE_COMMIT: ${{ steps.configure.outputs.base_commit }}
+        run: git bundle create "$RUNNER_TEMP/release.bundle" HEAD "^$BASE_COMMIT"
+      - uses: actions/upload-artifact@v4
         with:
-          name: release-notes
-          path: RELEASE_NOTES.md
-          retention-days: 1
+          name: release-source
+          path: |
+            ${{ runner.temp }}/release.bundle
+            ${{ runner.temp }}/RELEASE_NOTES.md
+          if-no-files-found: error
+          retention-days: 7
 
-  # ────────────────────────────────────────────
-  # 6. Build binaries (dynamic matrix)
-  # ────────────────────────────────────────────
   build:
     name: Build ${{ matrix.target }}
-    needs: [configure, prepare]
-    if: ${{ always() && !failure() && !cancelled() }}
+    needs: prepare
+    if: ${{ inputs.release_kind == 'application' }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          ref: ${{ needs.prepare.outputs.commit_sha || needs.configure.outputs.base_commit }}
+          ref: ${{ needs.prepare.outputs.base_commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-source
+          path: ${{ runner.temp }}/release-source
+      - name: Restore validated release commit
+        env:
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit_sha }}
+        run: |
+          git fetch --no-tags "$RUNNER_TEMP/release-source/release.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$RELEASE_COMMIT"
+          git checkout --detach "$RELEASE_COMMIT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -440,32 +336,36 @@ jobs:
       - name: Install build deps (native linux)
         if: ${{ startsWith(matrix.os, 'ubuntu') }}
         run: |
-          # shellcheck disable=SC2086
-          [ -n "$APT_DEPS" ] && { sudo apt-get update && sudo apt-get install -y $APT_DEPS; } || true
+          if [ -n "$APT_DEPS" ]; then
+            sudo apt-get update
+            read -r -a packages <<< "$APT_DEPS"
+            sudo apt-get install -y -- "${packages[@]}"
+          fi
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Smoke test (native)
         shell: bash
         run: |
-          EXE="${{ inputs.BIN_NAME }}"
-          [ "${{ matrix.os }}" = "windows-latest" ] && EXE="${{ inputs.BIN_NAME }}.exe"
-          # shellcheck disable=SC2086
-          "./target/${{ matrix.target }}/release/$EXE" ${{ inputs.SMOKE_ARGS }}
+          python3 - <<'SMOKE'
+          import os, shlex, subprocess
+          exe = os.environ['BIN_NAME'] + ('.exe' if os.name == 'nt' else '')
+          subprocess.run(['./target/${{ matrix.target }}/release/' + exe, *shlex.split(os.environ['SMOKE_ARGS'])], check=True)
+          SMOKE
       - name: Ad-hoc sign macOS binary
         if: ${{ startsWith(matrix.os, 'macos') }}
-        run: codesign --force --sign - "target/${{ matrix.target }}/release/${{ inputs.BIN_NAME }}"
+        run: codesign --force --sign - "target/${{ matrix.target }}/release/$BIN_NAME"
       - name: Package macOS application
         if: ${{ startsWith(matrix.os, 'macos') }}
         shell: bash
         run: |
           set -euo pipefail
-          APP="${{ inputs.BIN_NAME }}.app"
+          APP="$BIN_NAME.app"
           if [ -d "assets/$APP" ]; then
             cp -R "assets/$APP" "$APP"
             mkdir -p "$APP/Contents/Resources"
-            cp "target/${{ matrix.target }}/release/${{ inputs.BIN_NAME }}" "$APP/Contents/Resources/"
-            cp "assets/${{ inputs.BIN_NAME }}.icns" "$APP/Contents/Resources/"
-            chmod +x "$APP/Contents/MacOS/${{ inputs.BIN_NAME }}"
+            cp "target/${{ matrix.target }}/release/$BIN_NAME" "$APP/Contents/Resources/"
+            cp "assets/$BIN_NAME.icns" "$APP/Contents/Resources/"
+            chmod +x "$APP/Contents/MacOS/$BIN_NAME"
             VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r --arg root "$GITHUB_WORKSPACE/Cargo.toml" \
               '.packages[] | select(.manifest_path == $root) | .version')
             /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION%%-*}" "$APP/Contents/Info.plist"
@@ -477,89 +377,47 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          EXE="${{ inputs.BIN_NAME }}"
-          [ "${{ matrix.os }}" = "windows-latest" ] && EXE="${{ inputs.BIN_NAME }}.exe"
+          EXE="$BIN_NAME"
+          [ "${{ matrix.os }}" = "windows-latest" ] && EXE="$BIN_NAME.exe"
           cp "target/${{ matrix.target }}/release/$EXE" .
           FILES=("$EXE" LICENSE README.md)
-          for ASSET in assets/icon.svg "assets/${{ inputs.BIN_NAME }}.desktop" "assets/${{ inputs.BIN_NAME }}.png" \
-            "${{ inputs.BIN_NAME }}.ico" "assets/${{ inputs.BIN_NAME }}.icns"; do
+          for ASSET in assets/icon.svg "assets/$BIN_NAME.desktop" "assets/$BIN_NAME.png" \
+            "$BIN_NAME.ico" "assets/$BIN_NAME.icns"; do
             if [ -f "$ASSET" ]; then FILES+=("$ASSET"); fi
           done
-          if [ "${{ matrix.os }}" != "windows-latest" ] && [ -d "${{ inputs.BIN_NAME }}.app" ]; then
-            FILES+=("${{ inputs.BIN_NAME }}.app")
+          if [ "${{ matrix.os }}" != "windows-latest" ] && [ -d "$BIN_NAME.app" ]; then
+            FILES+=("$BIN_NAME.app")
           fi
           if [ "${{ matrix.pkg }}" = "zip" ]; then
-            7z a "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.zip" "${FILES[@]}"
+            7z a "dist/${PKG_PREFIX}-${{ matrix.target }}.zip" "${FILES[@]}"
           else
-            tar -cJf "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.tar.xz" "${FILES[@]}"
-            tar -czf "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.tar.gz" "${FILES[@]}"
+            tar -cJf "dist/${PKG_PREFIX}-${{ matrix.target }}.tar.xz" "${FILES[@]}"
+            tar -czf "dist/${PKG_PREFIX}-${{ matrix.target }}.tar.gz" "${FILES[@]}"
           fi
       - name: Package DMG (macOS)
         if: ${{ inputs.build_dmg && startsWith(matrix.os, 'macos') }}
         run: |
           set -euo pipefail
           mkdir -p dmg_root
-          cp "${{ inputs.BIN_NAME }}" LICENSE README.md dmg_root/
-          if [ -d "${{ inputs.BIN_NAME }}.app" ]; then
-            cp -R "${{ inputs.BIN_NAME }}.app" dmg_root/
+          cp "$BIN_NAME" LICENSE README.md dmg_root/
+          if [ -d "$BIN_NAME.app" ]; then
+            cp -R "$BIN_NAME.app" dmg_root/
           fi
-          IMAGE="$RUNNER_TEMP/${{ inputs.PKG_PREFIX }}.dmg"
-          hdiutil create -volname "${{ inputs.BIN_NAME }}" -srcfolder dmg_root -ov -format UDRW "$IMAGE"
-          if [ -f "assets/${{ inputs.BIN_NAME }}.icns" ]; then
-            MOUNT="$RUNNER_TEMP/${{ inputs.PKG_PREFIX }}-volume"
+          IMAGE="$RUNNER_TEMP/${PKG_PREFIX}.dmg"
+          hdiutil create -volname "$BIN_NAME" -srcfolder dmg_root -ov -format UDRW "$IMAGE"
+          if [ -f "assets/$BIN_NAME.icns" ]; then
+            MOUNT="$RUNNER_TEMP/${PKG_PREFIX}-volume"
             mkdir -p "$MOUNT"
             hdiutil attach "$IMAGE" -nobrowse -mountpoint "$MOUNT"
             trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true' EXIT
-            cp "assets/${{ inputs.BIN_NAME }}.icns" "$MOUNT/.VolumeIcon.icns"
+            cp "assets/$BIN_NAME.icns" "$MOUNT/.VolumeIcon.icns"
             SetFile -a C "$MOUNT"
             hdiutil detach "$MOUNT"
             trap - EXIT
           fi
-          hdiutil convert "$IMAGE" -format UDZO -ov -o "dist/${{ inputs.PKG_PREFIX }}-${{ matrix.target }}.dmg"
-      - name: Checksums
-        shell: bash
-        run: |
-          cd dist
-          if command -v sha256sum >/dev/null 2>&1; then SUM="sha256sum"; else SUM="shasum -a 256"; fi
-          # shellcheck disable=SC2086
-          $SUM -- * > "sums-${{ matrix.target }}.txt"
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: asset-${{ matrix.target }}
-          path: dist/
-          retention-days: 1
-
-  # ────────────────────────────────────────────
-  # 7. Build .deb and .rpm (x86_64 + aarch64)
-  # ────────────────────────────────────────────
-  packages:
-    name: Packages ${{ matrix.arch }}
-    needs: [configure, prepare]
-    if: ${{ always() && !failure() && !cancelled() && inputs.build_packages }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: x86_64, target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { arch: aarch64, target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          ref: ${{ needs.prepare.outputs.commit_sha || needs.configure.outputs.base_commit }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Install build deps (native)
-        run: |
-          # shellcheck disable=SC2086
-          [ -n "$APT_DEPS" ] && { sudo apt-get update && sudo apt-get install -y $APT_DEPS; } || true
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+          hdiutil convert "$IMAGE" -format UDZO -ov -o "dist/${PKG_PREFIX}-${{ matrix.target }}.dmg"
       - name: Build packages
+        if: ${{ inputs.build_packages && startsWith(matrix.os, 'ubuntu') }}
         run: |
           set -euo pipefail
           cargo install cargo-deb cargo-generate-rpm --locked
@@ -574,266 +432,191 @@ jobs:
             cargo deb --no-build --target ${{ matrix.target }}
             cargo generate-rpm --target ${{ matrix.target }}
           fi
-      - name: Checksums
-        run: |
-          set -euo pipefail
-          mkdir -p pkg-dist
-          cp "target/${{ matrix.target }}/debian/"*.deb pkg-dist/
-          cp "target/${{ matrix.target }}/generate-rpm/"*.rpm pkg-dist/
-          cd pkg-dist
-          sha256sum -- * > "sums-pkg-${{ matrix.arch }}.txt"
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: asset-pkg-${{ matrix.arch }}
-          path: pkg-dist/
-          retention-days: 1
-
-  # ────────────────────────────────────────────
-  # 8. Build AppImage (x86_64)
-  # ────────────────────────────────────────────
-  appimage:
-    name: AppImage
-    needs: [configure, prepare]
-    if: ${{ always() && !failure() && !cancelled() && inputs.build_appimage }}
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          ref: ${{ needs.prepare.outputs.commit_sha || needs.configure.outputs.base_commit }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install build deps
+          cp "target/${{ matrix.target }}/debian/"*.deb dist/
+          cp "target/${{ matrix.target }}/generate-rpm/"*.rpm dist/
+      - name: Build AppImage
+        if: ${{ inputs.build_appimage && matrix.target == 'x86_64-unknown-linux-gnu' }}
+        env:
+          VERSION: ${{ needs.prepare.outputs.new_version }}
         run: |
           sudo apt-get update
-          # shellcheck disable=SC2086
-          sudo apt-get install -y $APT_DEPS libfuse2
-      - name: Build release binary
-        run: cargo build --release --locked
-      - name: Download linuxdeploy
-        run: |
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
-      - name: Build AppImage
-        run: |
-          set -euo pipefail
-          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r --arg root "$GITHUB_WORKSPACE/Cargo.toml" \
-            '.packages[] | select(.manifest_path == $root) | .version')
-          export VERSION
-          ./linuxdeploy-x86_64.AppImage \
+          sudo apt-get install -y libfuse2
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/linuxdeploy.AppImage" https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/linuxdeploy.AppImage"
+          "$RUNNER_TEMP/linuxdeploy.AppImage" \
             --appdir AppDir \
-            --executable "target/release/${{ inputs.BIN_NAME }}" \
-            --desktop-file "assets/${{ inputs.BIN_NAME }}.desktop" \
-            --icon-file "assets/${{ inputs.BIN_NAME }}.png" \
+            --executable "target/${{ matrix.target }}/release/$BIN_NAME" \
+            --desktop-file "assets/$BIN_NAME.desktop" \
+            --icon-file "assets/$BIN_NAME.png" \
             --output appimage
-          mkdir -p dist
-          for f in "${{ inputs.BIN_NAME }}"*.AppImage; do
-            TARGET="dist/${{ inputs.PKG_PREFIX }}-$VERSION-x86_64.AppImage"
-            [ "$f" = "$TARGET" ] || mv "$f" "$TARGET"
-          done
-          cd dist && sha256sum -- * > sums-appimage.txt
+          shopt -s nullglob
+          images=("$BIN_NAME"*.AppImage)
+          test "${#images[@]}" -eq 1
+          mv "${images[0]}" "dist/${PKG_PREFIX}-$VERSION-x86_64.AppImage"
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then SUM="sha256sum"; else SUM="shasum -a 256"; fi
+          # shellcheck disable=SC2086
+          $SUM -- * > "sums-${{ matrix.target }}.txt"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: asset-appimage
+          name: asset-${{ matrix.target }}
           path: dist/
-          retention-days: 1
+          if-no-files-found: error
+          retention-days: 7
 
-  # ────────────────────────────────────────────
-  # 10. Collect assets, tag, create & publish release (single job — no polling)
-  # ────────────────────────────────────────────
-  collect:
-    name: Tag & Publish Release
-    needs: [configure, calculate_version, prepare, build, packages, appimage]
-    if: ${{ always() && !failure() && !cancelled() && !inputs.dry_run && needs.prepare.outputs.pushed == 'true' }}
+  publish:
+    name: Publish Validated Release
+    needs: [prepare, build]
+    if: ${{ always() && !failure() && !cancelled() && needs.prepare.result == 'success' && !inputs.dry_run }}
     runs-on: ubuntu-latest
-    outputs:
-      released: ${{ steps.rel.outputs.released }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    environment:
+      name: ${{ vars.RELEASE_APPROVAL_ENVIRONMENT || 'release-approval' }}
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.new_version }}
+      CRATE: ${{ needs.prepare.outputs.crate }}
+      BASE_COMMIT: ${{ needs.prepare.outputs.base_commit }}
+      RELEASE_COMMIT: ${{ needs.prepare.outputs.commit_sha }}
+      BRANCH: ${{ inputs.target_branch }}
+      GH_TOKEN: ${{ secrets.BOT_TOKEN || github.token }}
     steps:
+      - name: Require publishing credentials
+        env:
+          PUBLISH_CRATES: ${{ inputs.publish_crates }}
+          CREATE_DISCUSSION: ${{ inputs.create_discussion }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          if [ "$PUBLISH_CRATES" = true ] && [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo '::error::publish_crates requires CARGO_REGISTRY_TOKEN'; exit 1
+          fi
+          if [ "$CREATE_DISCUSSION" = true ] && [ -z "$BOT_TOKEN" ]; then
+            echo '::error::create_discussion requires BOT_TOKEN with discussion permissions'; exit 1
+          fi
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.BOT_TOKEN || github.token }}
+          ref: ${{ needs.prepare.outputs.base_commit }}
           fetch-depth: 0
-          ref: ${{ inputs.target_branch }}
-      - name: Download all assets
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-source
+          path: ${{ runner.temp }}/release-source
+      - name: Restore validated release commit
+        run: |
+          git fetch --no-tags "$RUNNER_TEMP/release-source/release.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$RELEASE_COMMIT"
+          git checkout --detach "$RELEASE_COMMIT"
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ inputs.publish_crates }}
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ inputs.publish_crates }}
+      - name: Check crates.io publication state
+        id: registry
+        if: ${{ inputs.publish_crates }}
+        run: |
+          # The exact release commit already passed package verification in prepare.
+          cargo package --locked --no-verify
+          STATUS=$(curl --silent --show-error --location --retry 3 --output "$RUNNER_TEMP/crate.json" --write-out '%{http_code}' "https://crates.io/api/v1/crates/$CRATE/$VERSION")
+          case "$STATUS" in
+            404) echo 'published=false' >> "$GITHUB_OUTPUT" ;;
+            200)
+              EXPECTED=$(jq -er '.version.checksum' "$RUNNER_TEMP/crate.json")
+              ACTUAL=$(sha256sum "target/package/$CRATE-$VERSION.crate" | cut -d' ' -f1)
+              if [ "$ACTUAL" != "$EXPECTED" ]; then
+                echo '::error::This crate version already exists with different contents'; exit 1
+              fi
+              echo 'published=true' >> "$GITHUB_OUTPUT"
+              ;;
+            *) echo "::error::crates.io returned HTTP $STATUS"; exit 1 ;;
+          esac
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.release_kind == 'application' }}
         with:
           pattern: asset-*
-          path: dist
+          path: ${{ runner.temp }}/release-assets
           merge-multiple: true
-      - name: Download release notes
-        uses: actions/download-artifact@v4
-        with:
-          name: release-notes
-      - name: Merge checksums
+      - name: Verify collected assets
+        if: ${{ inputs.release_kind == 'application' }}
         run: |
-          set -euo pipefail
-          [ -n "$(ls -A dist)" ] || { echo "::error::No build assets collected"; exit 1; }
-          cd dist
+          cd "$RUNNER_TEMP/release-assets"
           cat sums-*.txt > SHA256SUMS
+          sha256sum --check SHA256SUMS
           rm sums-*.txt
-          echo "Assets:"; ls -la
-      - name: Create and push tag
-        env:
-          TAG: ${{ needs.calculate_version.outputs.tag }}
-          COMMIT: ${{ needs.prepare.outputs.commit_sha }}
-          OVERWRITE: ${{ inputs.overwrite_release }}
+      - name: Push release commit and immutable tag atomically
         run: |
-          set -euo pipefail
-          if [ "$OVERWRITE" = "true" ]; then
-            git tag -f "$TAG" "$COMMIT"
-            git push origin "$TAG" --force
+          EXISTING=$(git ls-remote --tags origin "refs/tags/$TAG")
+          if [ -n "$EXISTING" ]; then
+            test "${EXISTING%%$'\t'*}" = "$RELEASE_COMMIT" || { echo '::error::Tag points to another commit'; exit 1; }
+            echo 'Release commit already pushed by this run; resuming publication.'
           else
-            git tag "$TAG" "$COMMIT"
-            git push origin "$TAG"
+            git fetch origin "refs/heads/$BRANCH"
+            test "$(git rev-parse FETCH_HEAD)" = "$BASE_COMMIT" || { echo '::error::Target branch changed; start a new release'; exit 1; }
+            git merge-base --is-ancestor "$BASE_COMMIT" "$RELEASE_COMMIT"
+            git tag "$TAG" "$RELEASE_COMMIT"
+            # The lease closes the fetch/push race; the ancestry check forbids rewriting history.
+            git push --atomic --force-with-lease="refs/heads/$BRANCH:$BASE_COMMIT" origin "$RELEASE_COMMIT:refs/heads/$BRANCH" "refs/tags/$TAG"
           fi
-      - name: Create release, upload assets, publish
-        id: rel
+      - name: Publish crates.io
+        if: ${{ inputs.publish_crates && steps.registry.outputs.published != 'true' }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.calculate_version.outputs.tag }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --no-verify
+      - name: Publish GitHub release
+        if: ${{ inputs.release_kind == 'application' }}
+        env:
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          CREATE_DISCUSSION: ${{ inputs.create_discussion }}
         run: |
-          set -euo pipefail
-          PRE_FLAG=(--prerelease="${{ inputs.prerelease }}")
           EXTRA=()
-          if [ "${{ inputs.create_discussion }}" = "true" ]; then
+          if [ "$CREATE_DISCUSSION" = true ]; then
             EXTRA+=(--discussion-category "$DISCUSSION_CATEGORY")
           fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file RELEASE_NOTES.md --title "$TAG" "${PRE_FLAG[@]}"
+          if DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            if [ "$DRAFT" = false ]; then
+              echo 'Release already published by this run.'
+              exit 0
+            fi
           else
-            gh release create "$TAG" --draft --title "$TAG" --notes-file RELEASE_NOTES.md "${PRE_FLAG[@]}" "${EXTRA[@]}"
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/release-source/RELEASE_NOTES.md" \
+              --prerelease="$PRERELEASE" "${EXTRA[@]}"
           fi
-          gh release upload "$TAG" dist/* --clobber
+          gh release upload "$TAG" "$RUNNER_TEMP/release-assets/"* --clobber
           gh release edit "$TAG" --draft=false
-          echo "released=true" >> "$GITHUB_OUTPUT"
-
-  # ────────────────────────────────────────────
-  # 11. Publish to crates.io
-  # ────────────────────────────────────────────
-  publish-crates:
-    name: Publish crates.io
-    needs: [calculate_version, collect]
-    if: ${{ always() && !failure() && !cancelled() && inputs.publish_crates && !inputs.overwrite_release && needs.collect.outputs.released == 'true' }}
-    runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          ref: ${{ needs.calculate_version.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install build deps
+      - name: Restore target branch for documentation updates
+        if: ${{ inputs.update_docs }}
         run: |
-          # shellcheck disable=SC2086
-          [ -n "$APT_DEPS" ] && { sudo apt-get update && sudo apt-get install -y $APT_DEPS; } || true
-      - name: Check token
-        id: token
-        run: |
-          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "provided=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "provided=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish
-        if: ${{ steps.token.outputs.provided == 'true' }}
-        run: cargo publish --locked
-      - name: Token missing
-        if: ${{ steps.token.outputs.provided == 'false' }}
-        run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"
-
-  # ────────────────────────────────────────────
-  # 12. Publish AUR package
-  # ────────────────────────────────────────────
-  publish-aur:
-    name: Publish AUR
-    needs: [calculate_version, collect]
-    if: ${{ always() && !failure() && !cancelled() && inputs.publish_aur && !inputs.overwrite_release && needs.collect.outputs.released == 'true' }}
-    runs-on: ubuntu-latest
-    env:
-      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          ref: ${{ needs.calculate_version.outputs.tag }}
-      - name: Update PKGBUILD
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.calculate_version.outputs.tag }}
-          VERSION: ${{ needs.calculate_version.outputs.new_version }}
-        run: |
-          set -euo pipefail
-          PKGVER=${VERSION//-/_}
-          sed -i "s/^pkgver=.*/pkgver=$PKGVER/" PKGBUILD
-          sed -i "s/^pkgrel=.*$/pkgrel=1/" PKGBUILD
-          TARBALL_NAME=$(gh release view "$TAG" --json assets \
-            --jq '[.assets[].name | select(contains("x86_64-unknown-linux-gnu") and endswith(".tar.xz"))][0]')
-          [ -n "$TARBALL_NAME" ] || { echo "::error::x86_64 linux tarball not in release"; exit 1; }
-          gh release download "$TAG" --pattern "$TARBALL_NAME" --output tarball.tar.xz
-          SHA=$(sha256sum tarball.tar.xz | cut -d' ' -f1)
-          sed -i "s/^sha256sums=.*/sha256sums=(\"$SHA\")/" PKGBUILD
-          sed -i "s|^source=.*|source=(\"${{ github.server_url }}/${{ github.repository }}/releases/download/$TAG/$TARBALL_NAME\")|" PKGBUILD
-      - name: Check key
-        id: key
-        run: |
-          if [ -n "${AUR_SSH_PRIVATE_KEY:-}" ]; then
-            echo "provided=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "provided=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish to AUR
-        if: ${{ steps.key.outputs.provided == 'true' }}
-        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
-        with:
-          pkgname: ${{ inputs.AUR_PKGNAME }}
-          pkgbuild: ./PKGBUILD
-          commit_username: ${{ vars.AUR_USERNAME }}
-          commit_email: ${{ vars.AUR_EMAIL }}
-          ssh_private_key: ${{ env.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Update to ${{ needs.calculate_version.outputs.new_version }}"
-      - name: Key missing
-        if: ${{ steps.key.outputs.provided == 'false' }}
-        run: echo "::warning::AUR_SSH_PRIVATE_KEY not set — skipping AUR publish"
-
-  # ────────────────────────────────────────────
-  # 13. Post-release docs commit (README/PKGBUILD references)
-  # ────────────────────────────────────────────
-  update-docs:
-    name: Update Docs
-    needs: [configure, calculate_version, collect]
-    if: ${{ always() && !failure() && !cancelled() && inputs.update_docs && needs.collect.outputs.released == 'true' }}
-    runs-on: ubuntu-latest
-    outputs:
-      commit_sha_docs: ${{ steps.docs.outputs.commit_sha_docs }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          ref: ${{ inputs.target_branch }}
+          git fetch origin "refs/heads/$BRANCH"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" FETCH_HEAD
+          git checkout --detach FETCH_HEAD
       - name: Update artifact references
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.calculate_version.outputs.tag }}
-          VERSION: ${{ needs.calculate_version.outputs.new_version }}
+        if: ${{ inputs.update_docs }}
         run: |
           set -euo pipefail
           ASSETS=$(gh release view "$TAG" --json assets)
           DEB_FILE=$(echo "$ASSETS" | jq -r '[.assets[].name | select(endswith("_amd64.deb"))][0] // ""')
           RPM_FILE=$(echo "$ASSETS" | jq -r '[.assets[].name | select(endswith(".x86_64.rpm"))][0] // ""')
-          TAR_FILE=$(echo "$ASSETS" | jq -r --arg p "${{ inputs.PKG_PREFIX }}" '[.assets[].name | select(startswith($p) and contains("x86_64-unknown-linux-gnu") and endswith(".tar.gz"))][0] // ""')
+          TAR_FILE=$(echo "$ASSETS" | jq -r --arg p "${PKG_PREFIX}" '[.assets[].name | select(startswith($p) and contains("x86_64-unknown-linux-gnu") and endswith(".tar.gz"))][0] // ""')
           DEB_ARM64=$(echo "$ASSETS" | jq -r '[.assets[].name | select(endswith("_arm64.deb"))][0] // ""')
           RPM_AARCH64=$(echo "$ASSETS" | jq -r '[.assets[].name | select(endswith(".aarch64.rpm"))][0] // ""')
           TAR_AARCH64=$(echo "$ASSETS" | jq -r '[.assets[].name | select(endswith("aarch64-unknown-linux-gnu.tar.gz"))][0] // ""')
-          [ -z "$DEB_FILE" ]     || sed -i -E "s/${{ inputs.PKG_PREFIX }}_[0-9a-zA-Z._~-]*_amd64\.deb/$DEB_FILE/g" README.md
-          [ -z "$RPM_FILE" ]     || sed -i -E "s/${{ inputs.PKG_PREFIX }}-[0-9a-zA-Z._~-]*\.x86_64\.rpm/$RPM_FILE/g" README.md
-          [ -z "$TAR_FILE" ]     || sed -i -E "s/${{ inputs.PKG_PREFIX }}-[0-9a-zA-Z._~-]*x86_64[0-9a-zA-Z._~-]*\.tar\.gz/$TAR_FILE/g" README.md
-          [ -z "$DEB_ARM64" ]    || sed -i -E "s/${{ inputs.PKG_PREFIX }}_[0-9a-zA-Z._~-]*_arm64\.deb/$DEB_ARM64/g" README.md
-          [ -z "$RPM_AARCH64" ]  || sed -i -E "s/${{ inputs.PKG_PREFIX }}-[0-9a-zA-Z._~-]*\.aarch64\.rpm/$RPM_AARCH64/g" README.md
-          [ -z "$TAR_AARCH64" ]  || sed -i -E "s/${{ inputs.PKG_PREFIX }}-[0-9a-zA-Z._~-]*aarch64[0-9a-zA-Z._~-]*\.tar\.gz/$TAR_AARCH64/g" README.md
+          APPIMAGE_FILE=$(echo "$ASSETS" | jq -r '[.assets[].name | select(endswith("-x86_64.AppImage"))][0] // ""')
+          [ -z "$APPIMAGE_FILE" ] || sed -i -E "s/${PKG_PREFIX}-[0-9a-zA-Z._+~-]*-x86_64\.AppImage/$APPIMAGE_FILE/g" README.md
+          [ -z "$DEB_FILE" ]     || sed -i -E "s/${PKG_PREFIX}_[0-9a-zA-Z._~-]*_amd64\.deb/$DEB_FILE/g" README.md
+          [ -z "$RPM_FILE" ]     || sed -i -E "s/${PKG_PREFIX}-[0-9a-zA-Z._~-]*\.x86_64\.rpm/$RPM_FILE/g" README.md
+          [ -z "$TAR_FILE" ]     || sed -i -E "s/${PKG_PREFIX}-[0-9a-zA-Z._~-]*x86_64[0-9a-zA-Z._~-]*\.tar\.gz/$TAR_FILE/g" README.md
+          [ -z "$DEB_ARM64" ]    || sed -i -E "s/${PKG_PREFIX}_[0-9a-zA-Z._~-]*_arm64\.deb/$DEB_ARM64/g" README.md
+          [ -z "$RPM_AARCH64" ]  || sed -i -E "s/${PKG_PREFIX}-[0-9a-zA-Z._~-]*\.aarch64\.rpm/$RPM_AARCH64/g" README.md
+          [ -z "$TAR_AARCH64" ]  || sed -i -E "s/${PKG_PREFIX}-[0-9a-zA-Z._~-]*aarch64[0-9a-zA-Z._~-]*\.tar\.gz/$TAR_AARCH64/g" README.md
           if [ -f PKGBUILD ]; then
             PKGVER=${VERSION//-/_}
             sed -i "s/^pkgver=.*/pkgver=$PKGVER/" PKGBUILD
@@ -843,111 +626,17 @@ jobs:
               gh release download "$TAG" --pattern "$TARBALL_NAME" --output tarball.tar.xz
               SHA=$(sha256sum tarball.tar.xz | cut -d' ' -f1)
               sed -i "s/^sha256sums=.*/sha256sums=(\"$SHA\")/" PKGBUILD
-              sed -i "s|^source=.*|source=(\"${{ github.server_url }}/${{ github.repository }}/releases/download/$TAG/$TARBALL_NAME\")|" PKGBUILD
+              sed -i "s|^source=.*|source=(\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$TARBALL_NAME\")|" PKGBUILD
             fi
           fi
-      - name: Commit and push
-        id: docs
+      - name: Commit documentation updates
+        if: ${{ inputs.update_docs }}
         run: |
-          set -euo pipefail
-          TAG="${{ needs.calculate_version.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md
-          [ -f PKGBUILD ] && git add PKGBUILD
+          if [ -f PKGBUILD ]; then git add PKGBUILD; fi
           if ! git diff --staged --quiet; then
             git commit -m "release: update versions to $TAG"
-            git fetch origin "${{ inputs.target_branch }}"
-            git rebase "origin/${{ inputs.target_branch }}"
-            git push origin "HEAD:${{ inputs.target_branch }}"
-            echo "commit_sha_docs=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          else
-            echo "commit_sha_docs=" >> "$GITHUB_OUTPUT"
+            git push origin "HEAD:refs/heads/$BRANCH"
           fi
-
-  # ────────────────────────────────────────────
-  # 14. Cleanup on failure OR cancellation (replaces cleanup-cancelled-release.yml)
-  # ────────────────────────────────────────────
-  cleanup:
-    name: Cleanup on Failure/Cancel
-    needs: [configure, calculate_version, prepare, build, packages, appimage, collect, publish-crates, publish-aur, update-docs]
-    if: ${{ always() && (failure() || cancelled()) }}
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ needs.calculate_version.outputs.tag }}
-      OLD_VERSION: ${{ needs.calculate_version.outputs.old_version }}
-      BRANCH: ${{ needs.calculate_version.outputs.target_branch }}
-      OVERWRITE: ${{ needs.calculate_version.outputs.overwrite }}
-      PUSHED: ${{ needs.prepare.outputs.pushed }}
-      PREP_SHA: ${{ needs.prepare.outputs.commit_sha }}
-      DOCS_SHA: ${{ needs['update-docs'].outputs.commit_sha_docs }}
-      RELEASED: ${{ needs.collect.outputs.released }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.BOT_TOKEN || github.token }}
-          fetch-depth: 0
-      - name: Revert release (delete release/tag, revert commits by recorded SHA)
-        run: |
-          set -u
-          if [ -z "$TAG" ]; then
-            echo "Version was never calculated — nothing to undo."; exit 0
-          fi
-          if [ "$RELEASED" = "true" ]; then
-            echo "::warning::Release was already published. Post-release tasks failed. Will not revert."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ "$PUSHED" != "true" ]; then
-            echo "Nothing was pushed (dry-run or pre-push failure) — nothing to undo."; exit 0
-          fi
-          if [ "$OVERWRITE" = "true" ]; then
-            echo "Overwrite run: leaving pre-existing release/tag in place. Reverting commits only."
-          else
-            echo "::group::Delete release $TAG"
-            gh release delete "$TAG" --yes 2>/dev/null && echo "Deleted release $TAG" \
-              || echo "Release $TAG not found (OK)"
-            echo "::endgroup::"
-            echo "::group::Delete tag $TAG"
-            git push origin --delete "$TAG" 2>/dev/null && echo "Deleted tag $TAG" \
-              || echo "Tag $TAG not found (OK)"
-            echo "::endgroup::"
-          fi
-
-          echo "::group::Revert commits on $BRANCH"
-          git fetch origin "$BRANCH" 2>/dev/null || {
-            echo "::warning::Branch $BRANCH not found, skipping revert"; exit 0
-          }
-          git checkout "origin/$BRANCH" --detach
-          REVERTED=0
-          for SHA in "$DOCS_SHA" "$PREP_SHA"; do
-            [ -z "$SHA" ] && continue
-            echo "Reverting $SHA..."
-            if git revert --no-edit "$SHA" 2>/dev/null; then
-              REVERTED=$((REVERTED + 1))
-            elif git revert --no-edit -X theirs "$SHA" 2>/dev/null; then
-              echo "Reverted with theirs strategy"
-              REVERTED=$((REVERTED + 1))
-            else
-              git revert --abort 2>/dev/null || true
-              echo "::warning::Could not revert $SHA. Manual cleanup needed (tag=$TAG old_version=$OLD_VERSION)"
-            fi
-          done
-          if [ "$REVERTED" -gt 0 ]; then
-            git fetch origin "$BRANCH"
-            if git rebase "origin/$BRANCH"; then
-              if git push origin "HEAD:$BRANCH"; then
-                echo "Pushed $REVERTED revert commit(s) to $BRANCH"
-              else
-                echo "::warning::Revert push failed. Manual: git push origin HEAD:$BRANCH"
-              fi
-            else
-              git rebase --abort
-              echo "::warning::Rebase failed. Manual cleanup needed."
-            fi
-          else
-            echo "No commits to revert"
-          fi
-          echo "::endgroup::"
