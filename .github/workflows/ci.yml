@@ -86,6 +86,69 @@ jobs:
           if [ "$ALL_FEATURES" = true ]; then FEATURES+=(--all-features); fi
           cargo check --locked --all-targets "${FEATURES[@]}"
 
+  platform:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ALL_FEATURES
+          save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+      - name: Native platform tests
+        run: |
+          FEATURES=()
+          if [ "$ALL_FEATURES" = true ]; then FEATURES+=(--all-features); fi
+          cargo test --locked "${FEATURES[@]}"
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ALL_FEATURES
+          save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+      - name: Verify registry package
+        run: |
+          cargo package --locked
+          if [ "$ALL_FEATURES" = true ]; then cargo package --locked --all-features; fi
+      - uses: taiki-e/install-action@v2
+        if: ${{ hashFiles('deny.toml') != '' }}
+        with:
+          tool: cargo-deny
+      - name: Verify packaged dependency policy
+        if: ${{ hashFiles('deny.toml') != '' }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, tarfile, tempfile
+          from pathlib import Path
+
+          metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--no-deps', '--format-version', '1']))
+          package = next(p for p in metadata['packages'] if Path(p['manifest_path']).resolve() == Path('Cargo.toml').resolve())
+          name = f"{package['name']}-{package['version']}"
+          archive = Path(metadata['target_directory']) / 'package' / f'{name}.crate'
+          policy = Path('deny.toml').resolve()
+          with tempfile.TemporaryDirectory(prefix='package-policy-', dir=os.environ['RUNNER_TEMP']) as directory:
+              with tarfile.open(archive) as source:
+                  source.extractall(directory, filter='data')
+              subprocess.run(['cargo', 'deny', '--locked', '--all-features', 'check', '--config', str(policy)],
+                             cwd=Path(directory) / name, check=True)
+          PY
+
   deny:
     name: Deny
     runs-on: ubuntu-latest

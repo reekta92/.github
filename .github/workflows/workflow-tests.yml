@@ -3,9 +3,7 @@ name: Workflow Tests
 on:
   push:
     branches: [main, master]
-    paths: ['.github/workflows/**', '.github/scripts/**']
   pull_request:
-    paths: ['.github/workflows/**', '.github/scripts/**']
 
 permissions:
   contents: read

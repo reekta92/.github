@@ -325,12 +325,28 @@ jobs:
         env:
           BASE_COMMIT: ${{ steps.configure.outputs.base_commit }}
         run: git bundle create "$RUNNER_TEMP/release.bundle" HEAD "^$BASE_COMMIT"
+      - name: Write required CI helper
+        run: |
+          cat > "$RUNNER_TEMP/required-ci.sh" <<'SH'
+          set -euo pipefail
+          git push origin "$RELEASE_COMMIT:refs/heads/$CANDIDATE_BRANCH"
+          gh workflow run ci.yml --ref "$CANDIDATE_BRANCH"
+          for attempt in {1..30}; do
+            CI_RUN=$(gh run list --workflow ci.yml --branch "$CANDIDATE_BRANCH" --event workflow_dispatch --json databaseId,headSha |
+              jq -r --arg sha "$RELEASE_COMMIT" 'map(select(.headSha == $sha)) | first | .databaseId // empty')
+            if [ -n "$CI_RUN" ]; then break; fi
+            sleep 2
+          done
+          test -n "$CI_RUN" || { echo '::error::Release candidate CI did not start'; exit 1; }
+          gh run watch "$CI_RUN" --exit-status --interval 10
+          SH
       - uses: actions/upload-artifact@v4
         with:
           name: release-source
           path: |
             ${{ runner.temp }}/release.bundle
             ${{ runner.temp }}/RELEASE_NOTES.md
+            ${{ runner.temp }}/required-ci.sh
           if-no-files-found: error
           retention-days: 7
 
@@ -498,14 +514,49 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
-    name: Publish Validated Release
+  validate:
+    name: Validate Required CI
     needs: [prepare, build]
     if: ${{ always() && !failure() && !cancelled() && needs.prepare.result == 'success' && !inputs.dry_run }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: write
+      actions: write
+    outputs:
+      candidate_branch: ${{ steps.ci.outputs.candidate_branch }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_COMMIT: ${{ needs.prepare.outputs.commit_sha }}
+      CANDIDATE_BRANCH: release-candidate/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.base_commit }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-source
+          path: ${{ runner.temp }}/release-source
+      - name: Restore validated release commit
+        run: |
+          git fetch --no-tags "$RUNNER_TEMP/release-source/release.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$RELEASE_COMMIT"
+          git checkout --detach "$RELEASE_COMMIT"
+      - name: Run required CI on release candidate
+        id: ci
+        run: |
+          bash "$RUNNER_TEMP/release-source/required-ci.sh"
+          echo "candidate_branch=$CANDIDATE_BRANCH" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish Validated Release
+    needs: [prepare, build, validate]
+    if: ${{ always() && !failure() && !cancelled() && needs.validate.result == 'success' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      actions: write
     environment:
       name: ${{ vars.RELEASE_APPROVAL_ENVIRONMENT || 'release-approval' }}
       url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -516,6 +567,8 @@ jobs:
       BASE_COMMIT: ${{ needs.prepare.outputs.base_commit }}
       RELEASE_COMMIT: ${{ needs.prepare.outputs.commit_sha }}
       BRANCH: ${{ inputs.target_branch }}
+      CANDIDATE_BRANCH: ${{ needs.validate.outputs.candidate_branch }}
+      DOC_BRANCH: release-docs/${{ github.run_id }}-${{ github.run_attempt }}
       GH_TOKEN: ${{ secrets.BOT_TOKEN || github.token }}
     steps:
       - name: Require publishing credentials
@@ -668,5 +721,14 @@ jobs:
           if [ -f PKGBUILD ]; then git add PKGBUILD; fi
           if ! git diff --staged --quiet; then
             git commit -m "release: update versions to $TAG"
+            DOC_COMMIT=$(git rev-parse HEAD)
+            RELEASE_COMMIT="$DOC_COMMIT" CANDIDATE_BRANCH="$DOC_BRANCH" \
+              bash "$RUNNER_TEMP/release-source/required-ci.sh"
             git push origin "HEAD:refs/heads/$BRANCH"
+            git push origin --delete "$DOC_BRANCH"
+          fi
+      - name: Remove published candidate branch
+        run: |
+          if [ -n "$(git ls-remote --heads origin "refs/heads/$CANDIDATE_BRANCH")" ]; then
+            git push origin --delete "$CANDIDATE_BRANCH"
           fi

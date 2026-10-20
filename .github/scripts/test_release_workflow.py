@@ -220,6 +220,32 @@ class ReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(status=status, checksum=expected):
                 self.run_script(script, env={'CRATE': 'fixture', 'VERSION': '1.2.4', 'HTTP_STATUS': status, 'CHECKSUM': expected}, success=succeeds)
 
+    def test_release_and_documentation_commits_require_successful_exact_commit_ci(self):
+        self.candidate()
+        self.run_script(step('prepare', 'Write required CI helper'))
+        self.mock_command('gh', '''import json, os, sys
+from pathlib import Path
+with open(os.environ['GH_LOG'], 'a') as log:
+    print(json.dumps(sys.argv[1:]), file=log)
+if sys.argv[1:3] == ['run', 'list']:
+    print(json.dumps([{'databaseId': 6, 'headSha': 'unrelated'},
+                      {'databaseId': 7, 'headSha': os.environ['RELEASE_COMMIT']}]))
+if sys.argv[1:3] == ['run', 'watch']:
+    sys.exit(int(os.environ.get('CI_EXIT', '0')))
+''')
+        log = self.root / 'gh-log'
+        env = {'CANDIDATE_BRANCH': 'release-candidate/fixture', 'GH_LOG': str(log)}
+        script = (self.root / 'required-ci.sh').read_text()
+        self.run_script(script, env=env)
+        self.assertEqual(git(self.source, 'ls-remote', 'origin', 'refs/heads/release-candidate/fixture').split()[0], self.commit)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(calls[0], ['workflow', 'run', 'ci.yml', '--ref', env['CANDIDATE_BRANCH']])
+        self.assertEqual(calls[-1], ['run', 'watch', '7', '--exit-status', '--interval', '10'])
+        self.run_script(script, env={**env, 'CI_EXIT': '7'}, success=False)
+        self.assertIn('validate', WORKFLOW['jobs']['publish']['needs'])
+        self.assertIn('required-ci.sh', step('publish', 'Commit documentation updates'))
+        self.assertIn('!inputs.dry_run', WORKFLOW['jobs']['validate']['if'])
+
     def test_downloaded_assets_do_not_dirty_or_change_cargo_package(self):
         (self.source / 'src').mkdir()
         (self.source / 'src/lib.rs').write_text('pub fn fixture() {}\n')
