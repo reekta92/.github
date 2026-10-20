@@ -1,10 +1,12 @@
 """Exercise the actual inline release scripts without credentials or publishing."""
 import json
 import hashlib
+import io
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tarfile
 import unittest
 
 import yaml
@@ -243,6 +245,65 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.run_script(script, env=env, success=False)
         self.run_script(script, env={**env, 'CARGO_REGISTRY_TOKEN': 'fixture-token'})
         self.assertEqual(git(self.source, 'rev-parse', 'HEAD'), self.base)
+
+    def test_package_verification_checks_optional_features(self):
+        self.mock_command('cargo', "import json, os, sys\nwith open(os.environ['CARGO_LOG'], 'a') as log:\n print(json.dumps(sys.argv[1:]), file=log)\n")
+        log = self.root / 'cargo-commands'
+        for enabled in ['false', 'true']:
+            with self.subTest(all_features=enabled):
+                log.write_text('')
+                self.run_script(step('prepare', 'Verify crates.io package'),
+                                env={'ALL_FEATURES': enabled, 'CARGO_LOG': str(log)})
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(calls), 2 if enabled == 'true' else 1)
+                self.assertNotIn('--all-features', calls[0])
+                self.assertTrue(all('--locked' in call and '--dry-run' in call for call in calls))
+                self.assertEqual('--all-features' in calls[-1], enabled == 'true')
+
+    def test_optional_feature_failure_in_packaged_source_is_not_skipped(self):
+        (self.source / 'src').mkdir()
+        (self.source / 'src/lib.rs').write_text(
+            '#[cfg(feature = "optional")]\ncompile_error!("packaged optional feature failed");\npub fn fixture() {}\n')
+        (self.source / 'Cargo.toml').write_text(
+            '[package]\nname = "fixture"\nversion = "1.2.3"\nedition = "2021"\n[features]\noptional = []\n')
+        self.run_script('cargo generate-lockfile --offline')
+        git(self.source, 'add', '.')
+        git(self.source, 'commit', '-m', 'Optional feature fixture')
+        self.env['CARGO_NET_OFFLINE'] = 'true'
+        self.env['CARGO_TARGET_DIR'] = str(self.source / 'target')
+        # Exercise Cargo's package verifier without registry version lookups.
+        verify = step('prepare', 'Verify crates.io package').replace('cargo publish --dry-run', 'cargo package')
+        self.run_script(verify, env={'ALL_FEATURES': 'false'})
+        result = self.run_script(verify,
+                                 env={'ALL_FEATURES': 'true'}, success=False)
+        self.assertIn('packaged optional feature failed', result.stderr)
+
+    def test_packaged_policy_checks_isolated_archive_and_propagates_failures(self):
+        archive = self.source / 'target/package/fixture-1.2.3.crate'
+        archive.parent.mkdir(parents=True)
+        with tarfile.open(archive, 'w:gz') as package:
+            data = b'[package]\nname = "packaged-fixture"\nversion = "1.2.3"\n'
+            entry = tarfile.TarInfo('fixture-1.2.3/Cargo.toml')
+            entry.size = len(data)
+            package.addfile(entry, io.BytesIO(data))
+        (self.source / 'deny.toml').write_text('[advisories]\n')
+        self.mock_command('cargo', '''import json, os, sys
+from pathlib import Path
+with open(os.environ['CARGO_LOG'], 'w') as log:
+    json.dump({'args': sys.argv[1:], 'cwd': str(Path.cwd()),
+               'manifest': Path('Cargo.toml').read_text()}, log)
+sys.exit(int(os.environ.get('DENY_EXIT', '0')))
+''')
+        log = self.root / 'cargo-log'
+        env = {'CRATE': 'fixture', 'VERSION': '1.2.3', 'CARGO_LOG': str(log)}
+        self.run_script(step('prepare', 'Verify packaged dependency policy'), env=env)
+        call = json.loads(log.read_text())
+        self.assertEqual(call['args'], ['deny', '--locked', '--all-features', 'check',
+                                       '--config', str(self.source / 'deny.toml')])
+        self.assertIn('packaged-fixture', call['manifest'])
+        self.assertNotEqual(call['cwd'], str(self.source))
+        self.run_script(step('prepare', 'Verify packaged dependency policy'),
+                        env={**env, 'DENY_EXIT': '7'}, success=False)
 
     def test_application_pkgbuild_tracks_published_tarball(self):
         assets = ['fixture_1.2.4_amd64.deb', 'fixture-1.2.4-1.x86_64.rpm', 'fixture-x86_64-unknown-linux-gnu.tar.gz', 'fixture-x86_64-unknown-linux-gnu.tar.xz', 'fixture-1.2.4-x86_64.AppImage']

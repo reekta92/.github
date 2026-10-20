@@ -285,7 +285,37 @@ jobs:
           cargo test --locked "${FEATURES[@]}"
       - name: Verify crates.io package
         if: ${{ inputs.publish_crates }}
-        run: cargo publish --dry-run --locked
+        env:
+          ALL_FEATURES: ${{ inputs.all_features }}
+        run: |
+          cargo publish --dry-run --locked
+          if [ "$ALL_FEATURES" = true ]; then
+            cargo publish --dry-run --locked --all-features
+          fi
+      - name: Install packaged dependency checker
+        if: ${{ inputs.publish_crates && hashFiles('deny.toml') != '' }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Verify packaged dependency policy
+        if: ${{ inputs.publish_crates && hashFiles('deny.toml') != '' }}
+        env:
+          CRATE: ${{ steps.configure.outputs.crate }}
+          VERSION: ${{ steps.configure.outputs.new_version }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, tarfile, tempfile
+          from pathlib import Path
+
+          policy = Path('deny.toml').resolve()
+          name = f"{os.environ['CRATE']}-{os.environ['VERSION']}"
+          archive = Path('target/package') / f'{name}.crate'
+          with tempfile.TemporaryDirectory(prefix='package-policy-', dir=os.environ['RUNNER_TEMP']) as directory:
+              with tarfile.open(archive) as package:
+                  package.extractall(directory, filter='data')
+              subprocess.run(['cargo', 'deny', '--locked', '--all-features', 'check',
+                              '--config', str(policy)], cwd=Path(directory) / name, check=True)
+          PY
       - uses: cachix/install-nix-action@v31
         if: ${{ inputs.check_nix }}
       - name: Check Nix package
