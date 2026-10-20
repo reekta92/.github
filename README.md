@@ -32,11 +32,17 @@ The default stable bump is `patch`. A stable version starts its next prerelease 
 - Keep a committed `Cargo.lock`, a root `[package]` with an explicit version, and published dependencies supporting the features used by the packaged crate. Virtual workspaces are not supported.
 - Application packaging requires `LICENSE`, `README.md`, and the selected Cargo packaging metadata. AppImage additionally requires `assets/<binary>.desktop` and `assets/<binary>.png`.
 
-`clin-rs` currently uses Git dependencies. Publish compatible library versions before publishing the application on crates.io. In particular, the registry version of `pinstar` must expose `mermaid-preview`; a Git-only feature cannot be published through a downstream crate.
+Publish compatible library versions before publishing the application on crates.io.
+Clin's supported engine versions belong in its manifest and exact selections in
+its lockfile. The `mermaid-preview` feature uses published `merman-core-clin`
+compatibility code so its maintained YAML backend reaches registry consumers.
 
 ## Updating callers
 
-Push the shared workflow commit first, then update every caller's `uses` reference to its full SHA. Callers can adopt that SHA before this repository's default branch changes. This avoids breaking older callers on `@main` while inputs are removed. Keep caller references pinned when later changing the shared workflow.
+Merge and verify the shared workflow change on main first, then update callers'
+`uses` references to the full tested SHA. Retarget outstanding stacked PRs when
+their parent merges. Keep callers pinned while later changing the shared workflow;
+test changes to the caller contract before adopting the new reference.
 
 ## Continuous integration
 
@@ -79,8 +85,9 @@ temporary branches. Failed candidates remain available for investigation and can
 be removed after confirming that the release run is no longer active.
 
 Keep strict required status checks, deletion protection, and force-push
-protection on main. A documented administrator override is reserved for repairing
-the automation itself. New workflow changes must reach this repository's main
+protection on main, with no routine bypass actors. Administrators can temporarily
+change a rule to repair broken automation, recording and reverting the exception.
+New workflow changes must reach this repository's main
 before callers adopt them; retarget outstanding stacked PRs when their parent merges.
 
 ## Downstream Clin contracts
@@ -99,17 +106,18 @@ Clin commit, library release, and subsequent Clin pin-update PR.
 
 Root `[patch]` entries do not propagate to published packages. A green source
 checkout therefore does not establish a green registry dependency graph.
-The extracted-package policy gate deliberately rejects existing advisories or
+The extracted-package policy gate deliberately rejects advisories and
 license/source violations even if a source-only compatibility patch resolves
-them locally. Current Pinstar/Clin Mermaid consumers require a compatible
-published dependency before registry releases can pass that policy. Keep the
-documented root patch for Git consumers; do not suppress the packaged finding.
+them locally. Pinstar's published compatibility dependency carries its maintained
+YAML backend into consumers. Keep both the source and packaged graphs passing;
+an advisory exception is not a replacement for fixing a release dependency.
 
 ## Validation
 
 ```sh
 actionlint
 python3 -m pip install PyYAML==6.0.3
+cargo install cargo-deny --locked
 python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 ```
 
