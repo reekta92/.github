@@ -23,4 +23,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint"
       - run: python3 -m pip install PyYAML==6.0.3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
