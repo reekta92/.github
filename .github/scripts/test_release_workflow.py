@@ -215,11 +215,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         archive.write_bytes(b'validated package')
         checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
         self.mock_command('cargo', '')
-        self.mock_command('curl', "import json, os, pathlib, sys\npathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'version': {'checksum': os.environ['CHECKSUM']}}))\nprint(os.environ['HTTP_STATUS'], end='')\n")
+        self.mock_command('curl', "import json, os, pathlib, sys\nassert sys.argv[sys.argv.index('--user-agent') + 1] == 'rust-release-workflow (https://github.com/owner/fixture)'\npathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(json.dumps({'version': {'checksum': os.environ['CHECKSUM']}}))\nprint(os.environ['HTTP_STATUS'], end='')\n")
         script = step('publish', 'Check crates.io publication state')
         for status, expected, succeeds in [('404', '', True), ('200', checksum, True), ('200', 'different', False), ('403', '', False), ('500', '', False)]:
             with self.subTest(status=status, checksum=expected):
-                self.run_script(script, env={'CRATE': 'fixture', 'VERSION': '1.2.4', 'HTTP_STATUS': status, 'CHECKSUM': expected}, success=succeeds)
+                self.run_script(script, env={'CRATE': 'fixture', 'VERSION': '1.2.4', 'HTTP_STATUS': status, 'CHECKSUM': expected, 'GITHUB_SERVER_URL': 'https://github.com', 'GITHUB_REPOSITORY': 'owner/fixture'}, success=succeeds)
 
     def test_release_and_documentation_commits_require_successful_exact_commit_ci(self):
         self.candidate()

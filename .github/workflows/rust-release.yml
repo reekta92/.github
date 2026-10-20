@@ -611,7 +611,9 @@ jobs:
         run: |
           # The exact release commit already passed package verification in prepare.
           cargo package --locked --no-verify
-          STATUS=$(curl --silent --show-error --location --retry 3 --output "$RUNNER_TEMP/crate.json" --write-out '%{http_code}' "https://crates.io/api/v1/crates/$CRATE/$VERSION")
+          STATUS=$(curl --silent --show-error --location --retry 3 \
+            --user-agent "rust-release-workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY)" \
+            --output "$RUNNER_TEMP/crate.json" --write-out '%{http_code}' "https://crates.io/api/v1/crates/$CRATE/$VERSION")
           case "$STATUS" in
             404) echo 'published=false' >> "$GITHUB_OUTPUT" ;;
             200)
