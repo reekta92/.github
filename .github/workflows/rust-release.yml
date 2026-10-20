@@ -51,7 +51,7 @@ on:
         type: boolean
         default: false
       skip_gates:
-        description: "Skip fmt/clippy/tests; package verification remains mandatory"
+        description: "Skip preparation checks; real releases still run required CI and package verification"
         type: boolean
         default: false
       all_features:
