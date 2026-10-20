@@ -40,19 +40,48 @@ Push the shared workflow commit first, then update every caller's `uses` referen
 
 ## Continuous integration
 
-`ci.yml` uses three read-only jobs:
+`ci.yml` uses read-only jobs:
 
 - **Check:** formatting first, then Clippy and tests (including doctests) on stable Rust. These checks share one checkout, toolchain setup, and cache restore; Cargo can still compile separately for checking and linking. A separate stable `cargo check` is unnecessary because Clippy already checks all targets.
 - **MSRV:** read the root package's explicit `rust-version`, install that exact minimum (for example, `1.88` becomes `1.88.0`), and check all targets. This replaces both the previous shared Rust 1.90 constant and draw-rs's extra MSRV job.
 - **Deny:** check advisories, licenses, bans, and sources against the committed lockfile, including every feature. Repository dependency policies remain authoritative; CI does not suppress failures.
+- **Test (windows-latest)** and **Test (macos-latest):** run the native test suite, including doctests, on supported operating systems.
+- **Package:** compile the registry package with default and requested optional features, then apply `deny.toml` to the extracted archive. This catches missing packaged files and dependency patches that do not reach registry users.
 
 The `all_features` input enables optional integrations for tests, Clippy, and MSRV. The pinstar caller enables it for Mermaid; other current callers use their default features. pinstar declares Rust 1.90 because its locked image dependency graph already requires that compiler; graf declares Rust 1.88, and the other applications/libraries declare Rust 1.90.
 
 Rust cache keys include the selected feature mode and compiler version. Only successful default-branch push jobs save Rust caches. Pull requests restore the default-branch cache without uploading duplicate entries. Formatting has no compilation cache to restore. Concurrency cancels obsolete runs; every job has a time limit and checkouts do not retain credentials.
 
-Callers pin CI independently from the release workflow. The job names are now `Check`, `MSRV`, and `Deny`; update any external required-check rules referring to the removed `Format`, `Clippy`, `Test`, or `MSRV (1.90.0)` names. The five current repositories have no such required-check rules. draw-rs now runs pushes only on main/master and pull requests, avoiding two CI runs for each feature-branch PR update.
+Callers pin CI independently from the release workflow. Require `ci / Check`,
+`ci / MSRV`, `ci / Deny`, `ci / Package`, `ci / Test (windows-latest)`, and
+`ci / Test (macos-latest)` in branch rules. Libraries also require
+`clin-compat / Clin adapter`; Clin requires `development-tools`. The shared
+repository requires `workflow-tests`, which runs on every PR so documentation
+changes can satisfy its branch rules.
 
-Runner jobs fall from six to three per run (seven to three for draw-rs). This removes redundant checks and runner/cache setup; wall-clock speed depends on cache state and project size.
+Native tests cover automated filesystem, recovery, input, and rendering contracts.
+Before an application release, also perform the interactive checklist in Clin's
+`docs/RELEASE_CHECKLIST.md`; hosted runners cannot prove a real terminal's behavior.
+
+## Protected releases
+
+Every release caller must grant `contents: write` and `actions: write`, and its
+`ci.yml` must accept `workflow_dispatch`. After preparing and building a real
+release, the workflow pushes its exact candidate to a temporary
+`release-candidate/<run>-<attempt>` branch, dispatches CI, and waits for that
+commit's run to succeed before requesting release approval and publishing.
+The explicit dispatch works with `GITHUB_TOKEN`; no branch-rule bypass or bot
+token is needed. Dry runs create no branches or publishing mutations.
+
+Post-release documentation commits pass the same CI on `release-docs/` branches
+before their ordinary push to the target. Successful publication removes its
+temporary branches. Failed candidates remain available for investigation and can
+be removed after confirming that the release run is no longer active.
+
+Keep strict required status checks, deletion protection, and force-push
+protection on main. A documented administrator override is reserved for repairing
+the automation itself. New workflow changes must reach this repository's main
+before callers adopt them; retarget outstanding stacked PRs when their parent merges.
 
 ## Downstream Clin contracts
 

@@ -83,6 +83,52 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], 'clippy')
 
+    def test_native_platforms_run_tests_with_requested_features(self):
+        self.assertEqual(WORKFLOW['jobs']['platform']['strategy']['matrix']['os'],
+                         ['windows-latest', 'macos-latest'])
+        self.mock_cargo()
+        for enabled in ['false', 'true']:
+            (self.root / 'commands').write_text('')
+            self.run_script(step('platform', 'Native platform tests'), env={'ALL_FEATURES': enabled})
+            calls = [json.loads(line) for line in (self.root / 'commands').read_text().splitlines()]
+            self.assertEqual(calls, [['test', '--locked'] + (['--all-features'] if enabled == 'true' else [])])
+
+    def test_registry_package_failure_is_a_ci_failure(self):
+        self.mock_cargo()
+        self.run_script(step('package', 'Verify registry package'), env={'FAIL_COMMAND': 'package'}, success=False)
+        calls = [json.loads(line) for line in (self.root / 'commands').read_text().splitlines()]
+        self.assertEqual(calls, [['package', '--locked']])
+
+    def test_package_ci_checks_default_and_optional_features(self):
+        self.mock_cargo()
+        self.run_script(step('package', 'Verify registry package'), env={'ALL_FEATURES': 'true'})
+        calls = [json.loads(line) for line in (self.root / 'commands').read_text().splitlines()]
+        self.assertEqual(calls, [['package', '--locked'], ['package', '--locked', '--all-features']])
+
+    def test_package_policy_checks_extracted_archive_and_propagates_failure(self):
+        self.cargo_fixture('pub fn fixture() {}\n')
+        self.run_script('cargo package --offline --locked')
+        (self.root / 'deny.toml').write_text('[advisories]\n')
+        self.mock_cargo()
+        cargo = self.root / 'tools/cargo'
+        cargo.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+if sys.argv[1] == 'metadata':
+    root = Path(os.environ['FIXTURE_ROOT'])
+    print(json.dumps({'packages': [{'name': 'ci-fixture', 'version': '0.1.0', 'manifest_path': str(root / 'Cargo.toml')}],
+                      'target_directory': str(root / 'target')}))
+else:
+    Path(os.environ['CARGO_LOG']).write_text(json.dumps({'args': sys.argv[1:], 'cwd': str(Path.cwd())}))
+    sys.exit(int(os.environ.get('DENY_EXIT', '0')))
+''')
+        env = {'RUNNER_TEMP': str(self.root), 'FIXTURE_ROOT': str(self.root)}
+        self.run_script(step('package', 'Verify packaged dependency policy'), env=env)
+        call = json.loads((self.root / 'commands').read_text())
+        self.assertNotEqual(Path(call['cwd']), self.root)
+        self.assertEqual(call['args'], ['deny', '--locked', '--all-features', 'check', '--config', str(self.root / 'deny.toml')])
+        self.run_script(step('package', 'Verify packaged dependency policy'), env={**env, 'DENY_EXIT': '7'}, success=False)
+
     def test_failed_tests_and_msrv_checks_are_not_ignored(self):
         self.mock_cargo()
         self.run_script(step('check', 'Clippy and tests'), env={'FAIL_COMMAND': 'test'}, success=False)
