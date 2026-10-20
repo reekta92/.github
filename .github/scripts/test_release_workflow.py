@@ -317,15 +317,15 @@ if sys.argv[1:3] == ['run', 'watch']:
 from pathlib import Path
 with open(os.environ['CARGO_LOG'], 'w') as log:
     json.dump({'args': sys.argv[1:], 'cwd': str(Path.cwd()),
-               'manifest': Path('Cargo.toml').read_text()}, log)
+               'manifest': Path('Cargo.toml').read_text(), 'policy': Path('deny.toml').read_text()}, log)
 sys.exit(int(os.environ.get('DENY_EXIT', '0')))
 ''')
         log = self.root / 'cargo-log'
         env = {'CRATE': 'fixture', 'VERSION': '1.2.3', 'CARGO_LOG': str(log)}
         self.run_script(step('prepare', 'Verify packaged dependency policy'), env=env)
         call = json.loads(log.read_text())
-        self.assertEqual(call['args'], ['deny', '--locked', '--all-features', 'check',
-                                       '--config', str(self.source / 'deny.toml')])
+        self.assertEqual(call['args'], ['deny', '--locked', '--all-features', 'check'])
+        self.assertEqual(call['policy'], (self.source / 'deny.toml').read_text())
         self.assertIn('packaged-fixture', call['manifest'])
         self.assertNotEqual(call['cwd'], str(self.source))
         self.run_script(step('prepare', 'Verify packaged dependency policy'),

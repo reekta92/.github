@@ -119,14 +119,17 @@ if sys.argv[1] == 'metadata':
     print(json.dumps({'packages': [{'name': 'ci-fixture', 'version': '0.1.0', 'manifest_path': str(root / 'Cargo.toml')}],
                       'target_directory': str(root / 'target')}))
 else:
-    Path(os.environ['CARGO_LOG']).write_text(json.dumps({'args': sys.argv[1:], 'cwd': str(Path.cwd())}))
+    Path(os.environ['CARGO_LOG']).write_text(json.dumps({'args': sys.argv[1:], 'cwd': str(Path.cwd()), 'policy': Path('deny.toml').read_text()}))
     sys.exit(int(os.environ.get('DENY_EXIT', '0')))
 ''')
         env = {'RUNNER_TEMP': str(self.root), 'FIXTURE_ROOT': str(self.root)}
         self.run_script(step('package', 'Verify packaged dependency policy'), env=env)
         call = json.loads((self.root / 'commands').read_text())
         self.assertNotEqual(Path(call['cwd']), self.root)
-        self.assertEqual(call['args'], ['deny', '--locked', '--all-features', 'check', '--config', str(self.root / 'deny.toml')])
+        self.assertEqual(call['args'], ['deny', '--locked', '--all-features', 'check'])
+        self.assertEqual(call['policy'], (self.root / 'deny.toml').read_text())
+        parsed = subprocess.run(['cargo', *call['args'], '--help'], capture_output=True, text=True)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
         self.run_script(step('package', 'Verify packaged dependency policy'), env={**env, 'DENY_EXIT': '7'}, success=False)
 
     def test_failed_tests_and_msrv_checks_are_not_ignored(self):

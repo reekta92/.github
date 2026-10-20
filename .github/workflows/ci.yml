@@ -134,7 +134,7 @@ jobs:
         if: ${{ hashFiles('deny.toml') != '' }}
         run: |
           python3 - <<'PY'
-          import json, os, subprocess, tarfile, tempfile
+          import json, os, shutil, subprocess, tarfile, tempfile
           from pathlib import Path
 
           metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--no-deps', '--format-version', '1']))
@@ -145,8 +145,9 @@ jobs:
           with tempfile.TemporaryDirectory(prefix='package-policy-', dir=os.environ['RUNNER_TEMP']) as directory:
               with tarfile.open(archive) as source:
                   source.extractall(directory, filter='data')
-              subprocess.run(['cargo', 'deny', '--locked', '--all-features', 'check', '--config', str(policy)],
-                             cwd=Path(directory) / name, check=True)
+              checked = Path(directory) / name
+              shutil.copyfile(policy, checked / 'deny.toml')
+              subprocess.run(['cargo', 'deny', '--locked', '--all-features', 'check'], cwd=checked, check=True)
           PY
 
   deny:
