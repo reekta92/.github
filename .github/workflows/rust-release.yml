@@ -51,7 +51,7 @@ on:
         type: boolean
         default: false
       skip_gates:
-        description: "Skip fmt/clippy/tests; package verification remains mandatory"
+        description: "Skip preparation checks; real releases still run required CI and package verification"
         type: boolean
         default: false
       all_features:
@@ -309,6 +309,8 @@ jobs:
 
           policy = Path('deny.toml').resolve()
           name = f"{os.environ['CRATE']}-{os.environ['VERSION']}"
+          # The publish verifier may consume its temporary archive on newer Cargo.
+          subprocess.run(['cargo', 'package', '--locked', '--no-verify'], check=True)
           archive = Path('target/package') / f'{name}.crate'
           with tempfile.TemporaryDirectory(prefix='package-policy-', dir=os.environ['RUNNER_TEMP']) as directory:
               with tarfile.open(archive) as package:
