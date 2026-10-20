@@ -717,6 +717,8 @@ jobs:
           fi
       - name: Commit documentation updates
         if: ${{ inputs.update_docs }}
+        env:
+          RELEASE_CI_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -725,7 +727,7 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m "release: update versions to $TAG"
             DOC_COMMIT=$(git rev-parse HEAD)
-            RELEASE_COMMIT="$DOC_COMMIT" CANDIDATE_BRANCH="$DOC_BRANCH" \
+            GH_TOKEN="$RELEASE_CI_TOKEN" RELEASE_COMMIT="$DOC_COMMIT" CANDIDATE_BRANCH="$DOC_BRANCH" \
               bash "$RUNNER_TEMP/release-source/required-ci.sh"
             git push origin "HEAD:refs/heads/$BRANCH"
             git push origin --delete "$DOC_BRANCH"
