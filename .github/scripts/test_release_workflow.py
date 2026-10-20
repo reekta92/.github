@@ -247,6 +247,27 @@ if sys.argv[1:3] == ['run', 'watch']:
         self.assertIn('required-ci.sh', step('publish', 'Commit documentation updates'))
         self.assertIn('!inputs.dry_run', WORKFLOW['jobs']['validate']['if'])
 
+    def test_documentation_ci_uses_job_token_without_requiring_bot_action_permissions(self):
+        self.candidate()
+        self.run_script(step('prepare', 'Write required CI helper'))
+        (self.root / 'release-source').mkdir()
+        shutil.copyfile(self.root / 'required-ci.sh', self.root / 'release-source/required-ci.sh')
+        (self.source / 'README.md').write_text('Published version\n')
+        self.mock_command('gh', '''import json, os, sys
+from pathlib import Path
+with open(os.environ['GH_LOG'], 'a') as log:
+    print(os.environ['GH_TOKEN'], file=log)
+if sys.argv[1:3] == ['run', 'list']:
+    print(json.dumps([{'databaseId': 7, 'headSha': os.environ['RELEASE_COMMIT']}]))
+''')
+        log = self.root / 'gh-token-log'
+        self.run_script(step('publish', 'Commit documentation updates'), env={
+            'DOC_BRANCH': 'release-docs/fixture', 'GH_LOG': str(log),
+            'GH_TOKEN': 'fixture-publishing-bot', 'RELEASE_CI_TOKEN': 'fixture-job-token'})
+        self.assertEqual(set(log.read_text().splitlines()), {'fixture-job-token'})
+        self.assertEqual(git(self.source, 'ls-remote', 'origin', 'refs/heads/main').split()[0],
+                         git(self.source, 'rev-parse', 'HEAD'))
+
     def test_downloaded_assets_do_not_dirty_or_change_cargo_package(self):
         (self.source / 'src').mkdir()
         (self.source / 'src/lib.rs').write_text('pub fn fixture() {}\n')
