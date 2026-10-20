@@ -3,6 +3,7 @@ import json
 import hashlib
 import io
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -330,6 +331,29 @@ sys.exit(int(os.environ.get('DENY_EXIT', '0')))
         self.assertNotEqual(call['cwd'], str(self.source))
         self.run_script(step('prepare', 'Verify packaged dependency policy'),
                         env={**env, 'DENY_EXIT': '7'}, success=False)
+
+    def test_policy_recreates_archive_consumed_by_publish_verification(self):
+        (self.source / 'src').mkdir()
+        (self.source / 'src/lib.rs').write_text('pub fn fixture() {}\n')
+        (self.source / 'deny.toml').write_text('[advisories]\n')
+        (self.source / '.gitignore').write_text('/target/\n')
+        self.env.update(CARGO_TARGET_DIR=str(self.source / 'target'), CARGO_NET_OFFLINE='true')
+        self.run_script('cargo generate-lockfile --offline')
+        git(self.source, 'add', '.')
+        git(self.source, 'commit', '-m', 'Package fixture')
+        real_cargo = shutil.which('cargo')
+        self.mock_command('cargo', '''import os, subprocess, sys
+from pathlib import Path
+if sys.argv[1] == 'package':
+    sys.exit(subprocess.run([os.environ['REAL_CARGO'], *sys.argv[1:]]).returncode)
+assert sys.argv[1:] == ['deny', '--locked', '--all-features', 'check']
+assert Path('deny.toml').read_text() == '[advisories]\\n'
+''')
+        archive = self.source / 'target/package/fixture-1.2.3.crate'
+        self.assertFalse(archive.exists())
+        self.run_script(step('prepare', 'Verify packaged dependency policy'),
+                        env={'CRATE': 'fixture', 'VERSION': '1.2.3', 'REAL_CARGO': real_cargo})
+        self.assertTrue(archive.is_file())
 
     def test_application_pkgbuild_tracks_published_tarball(self):
         assets = ['fixture_1.2.4_amd64.deb', 'fixture-1.2.4-1.x86_64.rpm', 'fixture-x86_64-unknown-linux-gnu.tar.gz', 'fixture-x86_64-unknown-linux-gnu.tar.xz', 'fixture-1.2.4-x86_64.AppImage']
