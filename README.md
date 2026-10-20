@@ -15,7 +15,7 @@ Crate callers expose only version controls, the target branch, dry runs, and the
 ## Release guarantees
 
 1. Resolve the target branch once, calculate a strictly newer semver, update only the root package version, and create a local release commit. Dependency changes during the version update fail the run.
-2. Run formatting, Clippy, and tests on that commit. When crates.io publishing is enabled, `cargo publish --dry-run --locked` remains mandatory even when `skip_gates` is selected. This checks the packaged crate against registry dependencies rather than relying on Git dependencies or workspace patches.
+2. Run formatting, Clippy, and tests on that commit. When crates.io publishing is enabled, `cargo publish --dry-run --locked` remains mandatory even when `skip_gates` is selected. Callers requesting `all_features` also verify the all-feature package, preserving default-feature verification. This checks the packaged crate against registry dependencies rather than relying on Git dependencies or workspace patches. Repositories with `deny.toml` also run cargo-deny against the extracted package in an isolated directory, using the repository's policy and every feature; `skip_gates` cannot skip this check.
 3. Pass that exact commit to platform builds in a Git bundle. Native Linux jobs reuse their built binary for archives, .deb/.rpm, and AppImage. Dry runs build the candidate version without pushing a branch, creating a tag, or publishing anything.
 4. After successful checks and builds, request approval through the `release-approval` environment (or `RELEASE_APPROVAL_ENVIRONMENT`). Configure required reviewers in repository settings if approval is required. Dry runs never request publishing approval.
 5. Require selected publishing credentials, verify collected checksums, and push the release commit and tag atomically. A changed target branch aborts the run; it is never rebased into an untested release. Tags are never force-moved.
@@ -53,6 +53,28 @@ Rust cache keys include the selected feature mode and compiler version. Only suc
 Callers pin CI independently from the release workflow. The job names are now `Check`, `MSRV`, and `Deny`; update any external required-check rules referring to the removed `Format`, `Clippy`, `Test`, or `MSRV (1.90.0)` names. The five current repositories have no such required-check rules. draw-rs now runs pushes only on main/master and pull requests, avoiding two CI runs for each feature-branch PR update.
 
 Runner jobs fall from six to three per run (seven to three for draw-rs). This removes redundant checks and runner/cache setup; wall-clock speed depends on cache state and project size.
+
+## Downstream Clin contracts
+
+Library CI can call `clin-compat.yml` with a full `clin_ref` commit SHA containing
+Clin's tracked `scripts/check_upstream.py`. The workflow checks out the caller's
+candidate and that exact Clin consumer with read permissions and no persisted
+credentials. The consumer script patches the actual Git dependency source in a
+temporary copy, verifies candidate selection, and runs the matching existing
+Graf, Canvas, or Draw adapter tests. Original consumer pins remain unchanged.
+Callers keep their ordinary standalone CI and pin this reusable workflow to a
+reviewed full SHA independently. Paired changes link the library PR, compatible
+Clin commit, library release, and subsequent Clin pin-update PR.
+
+## Packaged dependency policy
+
+Root `[patch]` entries do not propagate to published packages. A green source
+checkout therefore does not establish a green registry dependency graph.
+The extracted-package policy gate deliberately rejects existing advisories or
+license/source violations even if a source-only compatibility patch resolves
+them locally. Current Pinstar/Clin Mermaid consumers require a compatible
+published dependency before registry releases can pass that policy. Keep the
+documented root patch for Git consumers; do not suppress the packaged finding.
 
 ## Validation
 
