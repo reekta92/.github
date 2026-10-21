@@ -4,13 +4,15 @@
 
 | Repository | Release kind | Outputs |
 | --- | --- | --- |
-| pinstar | `crate` | crates.io; all Cargo features checked |
-| graf | `crate` | crates.io (`graf-rs`) |
-| draw-rs | `crate` | crates.io |
+| pinstar | `crate` | crates.io, GitHub release, Linux CLI archives; all Cargo features checked and built |
+| graf | `crate` | crates.io (`graf-rs`), GitHub release, Linux CLI archives |
+| draw-rs | `crate` | crates.io, GitHub release, Linux CLI archives |
 | clin-rs | `application` | crates.io, Linux/Windows/macOS archives, .deb/.rpm, AppImage, DMG |
 | sicth | `application` | Same application formats, including Intel macOS; Nix checked |
 
-Crate callers expose only version controls, the target branch, dry runs, and the quality-gate escape hatch. Application callers also expose their relevant packaging options. Automatic AUR publishing is intentionally absent. Application releases can still update README and PKGBUILD references for downstream packagers; library releases do not update PKGBUILD files.
+Crate callers expose version controls, the target branch, dry runs, and the quality-gate escape hatch. They select `BIN_NAME`, `PKG_PREFIX` and `build_targets: linux-only` to build Linux x86_64 and ARM64 CLI archives. Application callers also expose their relevant desktop packaging options. Automatic AUR publishing is intentionally absent. Application releases can still update README and PKGBUILD references for downstream packagers.
+
+Every crate release creates a GitHub release after crates.io publication, with versioned CLI installation and Rust dependency instructions. It attaches the published `.crate` source archive and `SHA256SUMS`. Binary callers also attach `<prefix>-<version>-<target>.tar.xz` and `.tar.gz` (ZIP on Windows). Linux GNU binaries require glibc 2.35 or newer. Binary archives contain the executable at the root, `LICENSE`, and `README.md`; AUR maintainers can use the Linux archives and their checksums directly in architecture-specific PKGBUILD sources. Source packages can use the `.crate` archive or GitHub's tag source archive. Application archive names remain unchanged.
 
 ## Release guarantees
 
@@ -19,7 +21,7 @@ Crate callers expose only version controls, the target branch, dry runs, and the
 3. Pass that exact commit to platform builds in a Git bundle. Native Linux jobs reuse their built binary for archives, .deb/.rpm, and AppImage. Dry runs build the candidate version without pushing a branch, creating a tag, or publishing anything.
 4. After successful checks and builds, request approval through the `release-approval` environment (or `RELEASE_APPROVAL_ENVIRONMENT`). Configure required reviewers in repository settings if approval is required. Dry runs never request publishing approval.
 5. Require selected publishing credentials, verify collected checksums, and push the release commit and tag atomically. A changed target branch aborts the run; it is never rebased into an untested release. Tags are never force-moved.
-6. Publish crates.io first, then application GitHub releases. Published versions are never deleted on later failures. A retry of the failed publishing job accepts only the same release commit and, for existing crates.io versions, the same package checksum. Existing public GitHub releases are not overwritten; incomplete drafts can resume uploading assets.
+6. Publish crates.io first, then the GitHub release with verified assets. Published versions are never deleted on later failures. A retry of the failed publishing job accepts only the same release commit and, for existing crates.io versions, the same package checksum. Existing public GitHub releases are not overwritten; incomplete drafts can resume uploading assets. A failed upload leaves a draft and fails the run.
 7. Application documentation updates use the current branch and a normal push. Concurrent edits can reject that push without rewriting history or rolling back a published release.
 
 The default stable bump is `patch`. A stable version starts its next prerelease at the selected bumped version (for example, `1.2.3` becomes `1.2.4-rc.0`). Existing `rc.N` prereleases increment `N`, and disabling prerelease graduates to the stable base. An exact version overrides these controls and must be strictly newer, including when only build metadata differs. The actual version determines GitHub's prerelease flag.
@@ -30,7 +32,7 @@ The default stable bump is `patch`. A stable version starts its next prerelease 
 - `BOT_TOKEN` is optional; it is used only by publishing and documentation steps when branch protection requires a separate token. Otherwise `GITHUB_TOKEN` is used with `contents: write`. Preparations and builds use read permissions and do not persist checkout credentials.
 - Optional discussion creation requires `BOT_TOKEN` with discussion permissions and an `Announcements` discussion category.
 - Keep a committed `Cargo.lock`, a root `[package]` with an explicit version, and published dependencies supporting the features used by the packaged crate. Virtual workspaces are not supported.
-- Application packaging requires `LICENSE`, `README.md`, and the selected Cargo packaging metadata. AppImage additionally requires `assets/<binary>.desktop` and `assets/<binary>.png`.
+- Binary packaging requires `LICENSE`, `README.md`, a valid root `BIN_NAME` target and a safe `PKG_PREFIX`. Application desktop packages also require the selected Cargo packaging metadata. AppImage additionally requires `assets/<binary>.desktop` and `assets/<binary>.png`.
 
 Publish compatible library versions before publishing the application on crates.io.
 Clin's supported engine versions belong in its manifest and exact selections in
