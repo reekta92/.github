@@ -71,13 +71,21 @@ Before an application release, also perform the interactive checklist in Clin's
 
 ## Protected releases
 
-Every release caller must grant `contents: write` and `actions: write`, and its
+Every release caller must grant `contents: write`, `actions: write` and
+`statuses: write`, and its
 `ci.yml` must accept `workflow_dispatch`. After preparing and building a real
 release, the workflow pushes its exact candidate to a temporary
 `release-candidate/<run>-<attempt>` branch, dispatches CI, and waits for that
 commit's run to succeed before requesting release approval and publishing.
 The explicit dispatch works with `GITHUB_TOKEN`; no branch-rule bypass or bot
 token is needed. Dry runs create no branches or publishing mutations.
+
+GitHub does not count dispatched check suites toward a direct protected-branch
+push. After the exact candidate run succeeds, the workflow records each successful
+job as a commit status, linking to that job. The same required check names and
+GitHub Actions identity still apply; failed or skipped jobs receive no success
+status, and status publication errors abort the release. Documentation commits
+use the same process.
 
 Post-release documentation commits pass the same CI on `release-docs/` branches
 before their ordinary push to the target. Successful publication removes its
