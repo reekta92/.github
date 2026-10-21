@@ -342,6 +342,15 @@ jobs:
           done
           test -n "$CI_RUN" || { echo '::error::Release candidate CI did not start'; exit 1; }
           gh run watch "$CI_RUN" --exit-status --interval 10
+          # Dispatched check suites do not satisfy direct-push branch rules.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN/jobs" \
+            --jq '.jobs[] | select(.conclusion == "success") | [.name, .html_url] | @tsv' > "$RUNNER_TEMP/ci-statuses.tsv"
+          test -s "$RUNNER_TEMP/ci-statuses.tsv" || { echo '::error::Candidate CI has no successful jobs'; exit 1; }
+          while IFS=$'\t' read -r CONTEXT URL; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$RELEASE_COMMIT" \
+              -f state=success -f context="$CONTEXT" -f target_url="$URL" \
+              -f description='Passed on the exact release candidate' > /dev/null
+          done < "$RUNNER_TEMP/ci-statuses.tsv"
           SH
       - uses: actions/upload-artifact@v4
         with:
@@ -526,6 +535,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      statuses: write
     outputs:
       candidate_branch: ${{ steps.ci.outputs.candidate_branch }}
     env:
@@ -560,6 +570,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      statuses: write
     environment:
       name: ${{ vars.RELEASE_APPROVAL_ENVIRONMENT || 'release-approval' }}
       url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

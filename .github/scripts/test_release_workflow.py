@@ -233,16 +233,31 @@ if sys.argv[1:3] == ['run', 'list']:
                       {'databaseId': 7, 'headSha': os.environ['RELEASE_COMMIT']}]))
 if sys.argv[1:3] == ['run', 'watch']:
     sys.exit(int(os.environ.get('CI_EXIT', '0')))
+if sys.argv[1:3] == ['api', '--paginate']:
+    print('ci / Check\thttps://github.com/owner/fixture/actions/jobs/9')
+if sys.argv[1:4] == ['api', '--method', 'POST']:
+    sys.exit(int(os.environ.get('STATUS_EXIT', '0')))
 ''')
         log = self.root / 'gh-log'
-        env = {'CANDIDATE_BRANCH': 'release-candidate/fixture', 'GH_LOG': str(log)}
+        env = {'CANDIDATE_BRANCH': 'release-candidate/fixture', 'GH_LOG': str(log), 'GITHUB_REPOSITORY': 'owner/fixture'}
         script = (self.root / 'required-ci.sh').read_text()
         self.run_script(script, env=env)
         self.assertEqual(git(self.source, 'ls-remote', 'origin', 'refs/heads/release-candidate/fixture').split()[0], self.commit)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(calls[0], ['workflow', 'run', 'ci.yml', '--ref', env['CANDIDATE_BRANCH']])
-        self.assertEqual(calls[-1], ['run', 'watch', '7', '--exit-status', '--interval', '10'])
+        self.assertEqual(calls[2], ['run', 'watch', '7', '--exit-status', '--interval', '10'])
+        self.assertIn('select(.conclusion == "success")', calls[3][-1])
+        self.assertEqual(calls[-1][3], f'repos/owner/fixture/statuses/{self.commit}')
+        self.assertIn('context=ci / Check', calls[-1])
+        self.assertIn('target_url=https://github.com/owner/fixture/actions/jobs/9', calls[-1])
+        log.write_text('')
         self.run_script(script, env={**env, 'CI_EXIT': '7'}, success=False)
+        self.assertNotIn('POST', log.read_text())
+        self.run_script(script, env={**env, 'STATUS_EXIT': '7'}, success=False)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/main'), self.base)
+        self.assertEqual(git(self.remote, 'tag'), '')
+        for job in ['validate', 'publish']:
+            self.assertEqual(WORKFLOW['jobs'][job]['permissions']['statuses'], 'write')
         self.assertIn('validate', WORKFLOW['jobs']['publish']['needs'])
         self.assertIn('required-ci.sh', step('publish', 'Commit documentation updates'))
         self.assertIn('!inputs.dry_run', WORKFLOW['jobs']['validate']['if'])
@@ -259,11 +274,14 @@ with open(os.environ['GH_LOG'], 'a') as log:
     print(os.environ['GH_TOKEN'], file=log)
 if sys.argv[1:3] == ['run', 'list']:
     print(json.dumps([{'databaseId': 7, 'headSha': os.environ['RELEASE_COMMIT']}]))
+if sys.argv[1:3] == ['api', '--paginate']:
+    print('ci / Check\thttps://github.com/owner/fixture/actions/jobs/9')
 ''')
         log = self.root / 'gh-token-log'
         self.run_script(step('publish', 'Commit documentation updates'), env={
             'DOC_BRANCH': 'release-docs/fixture', 'GH_LOG': str(log),
-            'GH_TOKEN': 'fixture-publishing-bot', 'RELEASE_CI_TOKEN': 'fixture-job-token'})
+            'GH_TOKEN': 'fixture-publishing-bot', 'RELEASE_CI_TOKEN': 'fixture-job-token',
+            'GITHUB_REPOSITORY': 'owner/fixture'})
         self.assertEqual(set(log.read_text().splitlines()), {'fixture-job-token'})
         self.assertEqual(git(self.source, 'ls-remote', 'origin', 'refs/heads/main').split()[0],
                          git(self.source, 'rev-parse', 'HEAD'))
