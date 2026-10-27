@@ -58,7 +58,17 @@ test changes to the caller contract before adopting the new reference.
 
 The `all_features` input enables optional integrations for tests, Clippy, and MSRV. The pinstar caller enables it for Mermaid; other current callers use their default features. pinstar declares Rust 1.90 because its locked image dependency graph already requires that compiler; graf declares Rust 1.88, and the other applications/libraries declare Rust 1.90.
 
-Rust cache keys include the selected feature mode and compiler version. Only successful default-branch push jobs save Rust caches. Pull requests restore the default-branch cache without uploading duplicate entries. Formatting has no compilation cache to restore. Concurrency cancels obsolete runs; every job has a time limit and checkouts do not retain credentials.
+The optional `test_runner` input selects a repository Python script for stable and
+native tests. It receives `--all-features` when requested and must run the full
+suite, including doctests, and propagate failures. Without it, jobs use
+`cargo test --locked`. A missing or failing script fails the job.
+
+The `debug_info` input defaults to `full`, matching Cargo's normal dev/test
+profiles. Callers can select `line-tables-only` to reduce compilation, linking,
+and artifact size while keeping source locations in backtraces. It does not
+change optimization or debug assertions.
+
+Rust cache keys include the selected feature mode, debug information level, and compiler version. Only successful default-branch push jobs save Rust caches. Pull requests restore the default-branch cache without uploading duplicate entries. Formatting has no compilation cache to restore. Concurrency cancels obsolete runs; every job has a time limit and checkouts do not retain credentials.
 
 Callers pin CI independently from the release workflow. Require `ci / Check`,
 `ci / MSRV`, `ci / Deny`, `ci / Package`, `ci / Test (windows-latest)`, and

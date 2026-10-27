@@ -26,6 +26,7 @@ class CiWorkflowTests(unittest.TestCase):
             'CARGO_TARGET_DIR': str(self.root / 'target'),
             'CARGO_NET_OFFLINE': 'true',
             'ALL_FEATURES': 'false',
+            'TEST_RUNNER': '',
             'CARGO_LOG': str(self.root / 'commands'),
         }
 
@@ -98,6 +99,46 @@ class CiWorkflowTests(unittest.TestCase):
         self.run_script(step('package', 'Verify registry package'), env={'FAIL_COMMAND': 'package'}, success=False)
         calls = [json.loads(line) for line in (self.root / 'commands').read_text().splitlines()]
         self.assertEqual(calls, [['package', '--locked']])
+
+    def test_custom_runner_receives_features_and_propagates_failures(self):
+        self.mock_cargo()
+        runner = self.root / 'custom tests.py'
+        runner.write_text('''import json, os, sys
+with open(os.environ['CARGO_LOG'], 'a') as log:
+    print(json.dumps(['custom-tests', *sys.argv[1:]]), file=log)
+sys.exit(int(os.environ.get('TEST_EXIT', '0')))
+''')
+        for job, name in [('check', 'Clippy and tests'), ('platform', 'Native platform tests')]:
+            for enabled in ['false', 'true']:
+                for exit_code in ['0', '7']:
+                    with self.subTest(job=job, features=enabled, exit_code=exit_code):
+                        (self.root / 'commands').write_text('')
+                        self.run_script(step(job, name), env={
+                            'TEST_RUNNER': str(runner), 'ALL_FEATURES': enabled,
+                            'TEST_EXIT': exit_code,
+                        }, success=exit_code == '0')
+                        calls = [json.loads(line) for line in (self.root / 'commands').read_text().splitlines()]
+                        self.assertEqual(calls[-1], ['custom-tests'] +
+                                         (['--all-features'] if enabled == 'true' else []))
+                        self.assertFalse(any(call[0] == 'test' for call in calls))
+
+    def test_missing_custom_runner_fails_without_falling_back(self):
+        self.mock_cargo()
+        self.run_script(step('platform', 'Native platform tests'),
+                        env={'TEST_RUNNER': 'missing.py'}, success=False)
+        self.assertFalse((self.root / 'commands').exists())
+
+    def test_debug_info_is_optional_and_separates_build_caches(self):
+        inputs = WORKFLOW[True]['workflow_call']['inputs']
+        self.assertEqual(inputs['debug_info']['default'], 'full')
+        self.assertEqual(inputs['test_runner']['default'], '')
+        for profile in ['DEV', 'TEST']:
+            key = f'CARGO_PROFILE_{profile}_DEBUG'
+            self.assertEqual(WORKFLOW['env'][key], '${{ inputs.debug_info }}')
+            for job in ['check', 'msrv', 'platform', 'package']:
+                cache = next(step for step in WORKFLOW['jobs'][job]['steps']
+                             if step.get('uses') == 'Swatinem/rust-cache@v2')
+                self.assertIn(key, cache['with']['env-vars'].split())
 
     def test_package_ci_checks_default_and_optional_features(self):
         self.mock_cargo()
