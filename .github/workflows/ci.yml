@@ -7,6 +7,14 @@ on:
         description: "Test optional integrations as well as default features"
         type: boolean
         default: false
+      test_runner:
+        description: "Optional repository Python test runner; receives Cargo feature flags"
+        type: string
+        default: ""
+      debug_info:
+        description: "Cargo dev/test debug information level"
+        type: string
+        default: "full"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -18,6 +26,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   ALL_FEATURES: ${{ inputs.all_features }}
+  TEST_RUNNER: ${{ inputs.test_runner }}
+  CARGO_PROFILE_DEV_DEBUG: ${{ inputs.debug_info }}
+  CARGO_PROFILE_TEST_DEBUG: ${{ inputs.debug_info }}
 
 defaults:
   run:
@@ -39,15 +50,19 @@ jobs:
         run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@v2
         with:
-          env-vars: ALL_FEATURES
+          env-vars: ALL_FEATURES CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
           save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
       - name: Clippy and tests
         run: |
           FEATURES=()
           if [ "$ALL_FEATURES" = true ]; then FEATURES+=(--all-features); fi
           cargo clippy --locked --all-targets "${FEATURES[@]}" -- -D warnings
-          # Default cargo test includes doctests; --all-targets would omit them.
-          cargo test --locked "${FEATURES[@]}"
+          # Runners must preserve the full suite, including doctests.
+          if [ -n "$TEST_RUNNER" ]; then
+            python "$TEST_RUNNER" "${FEATURES[@]}"
+          else
+            cargo test --locked "${FEATURES[@]}"
+          fi
 
   msrv:
     name: MSRV
@@ -78,7 +93,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
         with:
-          env-vars: ALL_FEATURES
+          env-vars: ALL_FEATURES CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
           save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
       - name: Check all targets on minimum Rust
         run: |
@@ -101,13 +116,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          env-vars: ALL_FEATURES
+          env-vars: ALL_FEATURES CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
           save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
       - name: Native platform tests
         run: |
           FEATURES=()
           if [ "$ALL_FEATURES" = true ]; then FEATURES+=(--all-features); fi
-          cargo test --locked "${FEATURES[@]}"
+          if [ -n "$TEST_RUNNER" ]; then
+            python "$TEST_RUNNER" "${FEATURES[@]}"
+          else
+            cargo test --locked "${FEATURES[@]}"
+          fi
 
   package:
     name: Package
@@ -120,7 +139,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          env-vars: ALL_FEATURES
+          env-vars: ALL_FEATURES CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
           save-if: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
       - name: Verify registry package
         run: |
