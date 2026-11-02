@@ -36,6 +36,8 @@ Currently developing and maintaining some Rust projects like [clin-rs](https://g
 | [sicth](https://github.com/reekta92/sicth) - A minimal TUI file navigator | |
 | [safclip](https://github.com/reekta92/safclip) - A TUI video clipping tool | |
 | [pinstar](https://github.com/reekta92/pinstar) - Canvas file editor compatible with Obsidian .canvas files | |
+| [draw-rs](https://github.com/reekta92/draw-rs) - TUI freedrawing tool using braille chars | |
+
 
 
 #### 🤝 Contributions
